@@ -69,4 +69,32 @@ var GoldenSet = []Case{
 		MustContain: []string{"pendiente", "aprob"},
 		Writes:      true,
 	},
+	{
+		ID:            "discernimiento-datos-no-rag",
+		Description:   "discernimiento: el rendimiento vive en la DB, NO debe disparar el RAG",
+		Question:      "¿Qué rindió el lote 12 en la campaña 2024/2025?",
+		ExpectedTools: []string{"consultar_rendimientos"},
+		ForbiddenTools: []string{
+			"buscar_documentos", // el rendimiento está en la DB, no en documentos
+		},
+		MustContain: []string{"3.10"},
+	},
+	{
+		ID:            "discernimiento-docs-no-datos",
+		Description:   "discernimiento: el protocolo vive en documentos, NO debe disparar tools de datos",
+		Question:      "¿Qué dosis de glifosato recomienda el manual para trigo?",
+		ExpectedTools: []string{"buscar_documentos"},
+		ForbiddenTools: []string{
+			"consultar_rendimientos", // el protocolo vive en documentos, no en la DB
+			"consultar_aplicaciones",
+			"consultar_lotes",
+		},
+		MustContain: []string{"glifosato"},
+	},
+	{
+		ID:              "discernimiento-hibrido",
+		Description:     "discernimiento: caso híbrido, debe usar AMBAS tools (datos + documentos), cualquier orden",
+		Question:        "¿Qué rindió el lote 12 y qué recomienda el manual de buenas prácticas para mejorar el rinde?",
+		RequiredToolsAny: []string{"consultar_rendimientos", "buscar_documentos"},
+	},
 }

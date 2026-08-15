@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/agro-agent/agro-agent/internal/llm"
+	"github.com/agro-agent/agro-agent/internal/router"
 	"github.com/agro-agent/agro-agent/internal/tools"
 )
 
@@ -23,6 +24,10 @@ import (
 type Options struct {
 	MaxIterations int         // default 5
 	OnEvent       func(Event) // nil-safe: si es nil, no se notifica nada
+	// Router clasifica la consulta por dominio (datos/documentos) para
+	// exponer al LLM solo las tools relevantes. Nil = comportamiento clásico:
+	// todas las tools, el modelo decide solo por descripción.
+	Router router.Clasificador
 }
 
 // Event es un punto de observación del loop de tool calling. Lo consume el
@@ -38,6 +43,7 @@ type Event struct {
 type Agent struct {
 	provider      llm.Provider
 	registry      *tools.Registry
+	router        router.Clasificador
 	maxIterations int
 	onEvent       func(Event)
 }
@@ -46,7 +52,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 5
 	}
-	return &Agent{provider: provider, registry: registry, maxIterations: opts.MaxIterations, onEvent: opts.OnEvent}
+	return &Agent{provider: provider, registry: registry, router: opts.Router, maxIterations: opts.MaxIterations, onEvent: opts.OnEvent}
 }
 
 // onEventCb emite un evento si hay callback configurado. Separado en un método
@@ -68,6 +74,10 @@ func (a *Agent) Registry() *tools.Registry { return a.registry }
 // MaxIterations expone el límite de iteraciones (ver Provider).
 func (a *Agent) MaxIterations() int { return a.maxIterations }
 
+// Router expone el clasificador de dominios (ver Provider). El transporte lo
+// propaga a sus agentes efímeros por request (mismo patrón que Registry).
+func (a *Agent) Router() router.Clasificador { return a.router }
+
 // Answer es el resultado final del loop.
 type Answer struct {
 	Text       string   // respuesta final del LLM
@@ -87,6 +97,22 @@ func toLLMTools(defs []tools.Def) []llm.ToolSchema {
 	return out
 }
 
+// filterByDominio conserva solo las definiciones cuyo Dominio está en la lista
+// que decidió el router. Mantiene el orden estable del registro.
+func filterByDominio(defs []tools.Def, dominios []tools.Dominio) []tools.Def {
+	set := make(map[tools.Dominio]struct{}, len(dominios))
+	for _, d := range dominios {
+		set[d] = struct{}{}
+	}
+	out := make([]tools.Def, 0, len(defs))
+	for _, def := range defs {
+		if _, ok := set[def.Dominio]; ok {
+			out = append(out, def)
+		}
+	}
+	return out
+}
+
 // Run ejecuta el agente sobre un historial previo y un mensaje del usuario.
 // El ctx DEBE traer el TenantID (lo inyecta el middleware de auth).
 func (a *Agent) Run(ctx context.Context, history []llm.Message, userText string) (Answer, error) {
@@ -94,12 +120,30 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, userText string)
 	messages = append(messages, history...)
 	messages = append(messages, llm.Message{Role: llm.RoleUser, Text: userText})
 
+	// Discernimiento: se clasifica UNA vez (sobre la pregunta más reciente,
+	// no sobre el historial completo) y se filtra el contrato que recibe el
+	// LLM. Sesgo no barrera: error del router o clasificación indefinida ⇒
+	// exponer todo. El registro conserva todas las tools: la resolución por
+	// nombre (a.registry.Get) sigue funcionando aunque el contrato esté filtrado.
+	defs := a.registry.Defs()
+	if a.router != nil {
+		dominios, err := a.router.Clasificar(ctx, userText)
+		if err != nil {
+			// El router nunca debe romper la conversación: ante error, sesgo
+			// no barrera ⇒ se exponen todas las tools.
+			dominios = nil
+		}
+		if len(dominios) > 0 {
+			defs = filterByDominio(defs, dominios)
+		}
+	}
+
 	start := time.Now()
 	answer := Answer{}
 	var total llm.Usage
 
 	for i := 0; i < a.maxIterations; i++ {
-		resp, err := a.provider.Chat(ctx, messages, toLLMTools(a.registry.Defs()))
+		resp, err := a.provider.Chat(ctx, messages, toLLMTools(defs))
 		if err != nil {
 			return Answer{}, fmt.Errorf("agent: llamada al LLM (iteración %d): %w", i+1, err)
 		}

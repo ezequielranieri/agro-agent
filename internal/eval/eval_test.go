@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,4 +179,106 @@ func newRegistryForEval() *tools.Registry {
 		all = append(all, tools.Tool{Name: name, Run: dummy})
 	}
 	return tools.NewRegistry(all...)
+}
+
+// TestRunForbiddenToolPass: el trace respeta el discernimiento (datos sin RAG).
+func TestRunForbiddenToolPass(t *testing.T) {
+	steps := []llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "consultar_rendimientos", Args: []byte(`{}`)}}},
+		{Text: "El lote 12 rindió 3.10 tn/ha."},
+	}
+	ag := agentWith(steps)
+	results := Run(context.Background(), ag, []Case{{
+		ID:             "discernimiento-datos-no-rag",
+		Question:       "¿Qué rindió el lote 12 en la campaña 2024/2025?",
+		ExpectedTools:  []string{"consultar_rendimientos"},
+		ForbiddenTools: []string{"buscar_documentos"},
+	}}, domain.TenantID(1), "2", "agronomo", true)
+
+	if !results[0].Pass {
+		t.Fatalf("esperaba PASS, got %+v", results[0].Failures)
+	}
+}
+
+// TestRunCatchesForbiddenTool: el trace cruza de dominio (RAG en consulta de
+// datos) → el caso FALLA con el mensaje de discernimiento.
+func TestRunCatchesForbiddenTool(t *testing.T) {
+	steps := []llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "buscar_documentos", Args: []byte(`{}`)}}},
+		{Text: "Acá va lo que encontré."},
+	}
+	ag := agentWith(steps)
+	results := Run(context.Background(), ag, []Case{{
+		ID:             "discernimiento-datos-no-rag",
+		Question:       "¿Qué rindió el lote 12?",
+		ForbiddenTools: []string{"buscar_documentos"},
+	}}, domain.TenantID(1), "2", "agronomo", true)
+
+	if results[0].Pass {
+		t.Fatal("esperaba FAIL: buscar_documentos estaba prohibida")
+	}
+	found := false
+	for _, f := range results[0].Failures {
+		if strings.Contains(f, "no debía usarse (discernimiento)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("falta el failure de discernimiento, got %v", results[0].Failures)
+	}
+}
+
+// TestRunRequiredToolsAnyPass: caso híbrido que usa AMBAS tools en cualquier
+// orden → PASS (no importa cuál venga primero).
+func TestRunRequiredToolsAnyPass(t *testing.T) {
+	steps := []llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "buscar_documentos", Args: []byte(`{}`)}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c2", Name: "consultar_rendimientos", Args: []byte(`{}`)}}},
+		{Text: "Rindió 3.10 tn/ha y el manual recomienda mejorar el drenaje."},
+	}
+	ag := agentWith(steps)
+	results := Run(context.Background(), ag, []Case{{
+		ID:               "discernimiento-hibrido",
+		Question:         "¿Qué rindió el lote 12 y qué recomienda el manual?",
+		RequiredToolsAny: []string{"consultar_rendimientos", "buscar_documentos"},
+	}}, domain.TenantID(1), "2", "agronomo", true)
+
+	if !results[0].Pass {
+		t.Fatalf("esperaba PASS, got %+v", results[0].Failures)
+	}
+}
+
+// TestRunRequiredToolsAnyMissing: el híbrido solo usa una de las dos → FAIL.
+func TestRunRequiredToolsAnyMissing(t *testing.T) {
+	steps := []llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "consultar_rendimientos", Args: []byte(`{}`)}}},
+		{Text: "Rindió 3.10 tn/ha."},
+	}
+	ag := agentWith(steps)
+	results := Run(context.Background(), ag, []Case{{
+		ID:               "discernimiento-hibrido",
+		Question:         "¿Qué rindió el lote 12 y qué recomienda el manual?",
+		RequiredToolsAny: []string{"consultar_rendimientos", "buscar_documentos"},
+	}}, domain.TenantID(1), "2", "agronomo", true)
+
+	if results[0].Pass {
+		t.Fatal("esperaba FAIL: falta buscar_documentos")
+	}
+}
+
+// TestSummarizeToolAccForbidden: un fallo por discernimiento (tool prohibida)
+// también baja ToolAcc, igual que un fallo por tools esperadas ausentes.
+func TestSummarizeToolAccForbidden(t *testing.T) {
+	results := []Result{
+		{Pass: true, Case: Case{ID: "a", ExpectedTools: []string{"t1"}}},
+		{Pass: false, Case: Case{ID: "b", ExpectedTools: []string{"t1"}, ForbiddenTools: []string{"t2"}},
+			Failures: []string{`tool "t2" no debía usarse (discernimiento)`}},
+	}
+	s := Summarize(results)
+	if s.Total != 2 || s.Passed != 1 || s.Failed != 1 {
+		t.Fatalf("conteo incorrecto: %+v", s)
+	}
+	if s.ToolAcc != 50 {
+		t.Fatalf("ToolAcc esperada 50%%, got %v", s.ToolAcc)
+	}
 }

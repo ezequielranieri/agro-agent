@@ -37,9 +37,11 @@ re-validation of the context.
                 │               (Gemini adapter)  │
 ┌───────────────┴─────────────────────────────────┴──────────────────┐
 │                    Application layer (use cases)                   │
-│  internal/agent    — orchestrator: tool-calling loop, max-iter      │
-│  internal/approval — HITL service: create/approve/reject, TTL,      │
-│                      token (hash-only), context re-validation       │
+│  internal/agent    — orchestrator: tool-calling loop, max-iter,        │
+│                      domain router (discernment)                       │
+│  internal/router   — deterministic query classifier: data vs documents │
+│  internal/approval — HITL service: create/approve/reject, TTL,          │
+│                      token (hash-only), context re-validation          │
 │  internal/embedding— RAG: Embedder port (Gemini)                    │
 │  internal/eval     — golden-set runner + summary                    │
 └───────────────▲─────────────────────────────────▲──────────────────┘
@@ -108,12 +110,28 @@ the top-k by cosine similarity **inside the tenant** — the LLM can cite the
 source file, and structured data never leaks into document search (nor vice
 versa).
 
+## Discernment router
+
+The agent does not hand the LLM every tool on each iteration. A deterministic
+classifier (`internal/router`, keyword rules over the normalized query —
+lowercase, accent-insensitive, full-word matching) decides the **domain** of
+the question — `datos` (DB) vs `documentos` (RAG) — and the orchestrator
+exposes **only the tools of those domains**. Every tool declares its domain
+(`tools.Dominio`); descriptions reinforce the same boundary ("use X, NOT Y").
+It is a **bias, not a barrier**: uncertain queries get all tools, and a
+router failure degrades to today's behavior. Result: fewer misrouted calls,
+less noise in the LLM context, lower cost — and a measurable guarantee via
+eval `ForbiddenTools` (must not call RAG for data questions, and vice versa).
+
 ## Evals
 
 `cmd/eval` runs a golden set (`internal/eval/cases.go`): each case checks the
-expected tool appears **in order** (subsequence, allowing exploration), the
-answer contains required real data, and — critically — **does not contain
-hallucinated numbers**. Cases that write (HITL) are skipped by default so
+expected tool appears **in order** (subsequence, allowing exploration) or —
+for hybrid questions — that **all required tools** appear in any order, the
+answer contains required real data, **forbidden tools are never called**
+(discernment: data questions must not trigger RAG, document questions must
+not trigger data tools), and — critically — **does not contain hallucinated
+numbers**. Cases that write (HITL) are skipped by default so
 eval runs are read-only. The harness is deterministic in tests (scripted fake
 provider) and measures routing accuracy + anti-hallucination against the real
 LLM.
@@ -202,8 +220,9 @@ DSN. All green today: build + vet + 60+ tests.
 - [x] HTTP API — JWT auth, tenant isolation, chat JSON + SSE streaming
 - [x] HITL — approval requests, opaque tokens, RBAC, re-validation, audit
 - [x] RAG — pgvector, `buscar_documentos`, `cmd/embed`
-- [x] Evals — golden set, tool routing + anti-hallucination harness
-- [ ] Eval live run (free-tier daily quota) + discernment test
+- [x] Discernment router — deterministic domain classifier + filtered tool exposure
+- [x] Evals — golden set, tool routing + anti-hallucination + discernment harness
+- [ ] Eval live run (free-tier daily quota)
 - [ ] Deployment (render.com, like agro-iam)
 
 ## License

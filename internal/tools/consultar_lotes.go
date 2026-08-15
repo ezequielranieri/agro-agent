@@ -27,7 +27,8 @@ func (p ConsultarLotesParams) validate() error {
 func ConsultarLotes(s store.LoteStore) Tool {
 	return Tool{
 		Name:        "consultar_lotes",
-		Description: "Consulta lotes de la cooperativa. Úsala para responder qué lotes existen, por código, campaña o cultivo (ej: todos los lotes con trigo en la campaña 2026/2027).",
+		Description: "Consulta lotes de la cooperativa. Úsala para responder qué lotes existen, por código, campaña o cultivo (ej: todos los lotes con trigo en la campaña 2026/2027)." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

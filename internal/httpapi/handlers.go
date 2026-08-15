@@ -77,6 +77,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// modo JSON el trace sale de Answer.ToolCalls, no de los eventos.
 	perReq := agent.New(s.agent.Provider(), s.agent.Registry(), agent.Options{
 		MaxIterations: s.agent.MaxIterations(),
+		// El router es compartido y sin estado: se propaga al agente efímero
+		// igual que Registry/Provider (ver server.go).
+		Router: s.agent.Router(),
 		OnEvent: func(e agent.Event) {
 			if sse {
 				writeSSEEvent(w, e)

@@ -13,6 +13,26 @@ import (
 	"encoding/json"
 )
 
+// Dominio es la fuente de verdad que alimenta una tool: datos estructurados
+// de la DB o documentos (RAG). El router de discernimiento (internal/router)
+// clasifica la consulta por dominio y expone al LLM solo las tools de esos
+// dominios; la descripción de cada tool refuerza la misma frontera.
+type Dominio string
+
+const (
+	DominioDatos      Dominio = "datos"
+	DominioDocumentos Dominio = "documentos"
+)
+
+// Sufijos de descripción para el contrato de discernimiento. El router es el
+// sesgo determinista; la descripción es la red de seguridad que SIEMPRE lee el
+// LLM (si el router fallara o devolviera indefinido, la frontera de dominio
+// sigue escrita en el contrato).
+const (
+	discernimientoDatosSufijo      = " NO uses esta tool para procedimientos, protocolos o recomendaciones: esa información vive en los documentos (buscar_documentos)."
+	discernimientoDocumentosSufijo = " NO uses esta tool para datos de lotes, rendimientos, aplicaciones o solicitudes: esos datos viven en la DB (consultar_lotes, consultar_rendimientos, etc.)."
+)
+
 // Result es lo que una tool devuelve. Data es un valor estructurado que el
 // orquestador le pasa al LLM para que arme la respuesta con números reales.
 type Result struct {
@@ -23,6 +43,7 @@ type Result struct {
 type Tool struct {
 	Name         string
 	Description  string
+	Dominio      Dominio
 	ParamsSchema map[string]any // JSON Schema, para el tool calling del LLM
 	Run          func(ctx context.Context, raw json.RawMessage) (Result, error)
 }
@@ -32,6 +53,7 @@ type Tool struct {
 type Def struct {
 	Name        string
 	Description string
+	Dominio     Dominio
 	Parameters  map[string]any // JSON Schema
 }
 
@@ -62,7 +84,7 @@ func (r *Registry) Defs() []Def {
 	out := make([]Def, 0, len(r.order))
 	for _, name := range r.order {
 		t := r.byName[name]
-		out = append(out, Def{Name: t.Name, Description: t.Description, Parameters: t.ParamsSchema})
+		out = append(out, Def{Name: t.Name, Description: t.Description, Dominio: t.Dominio, Parameters: t.ParamsSchema})
 	}
 	return out
 }

@@ -21,22 +21,26 @@ import (
 
 // Case es un caso del golden set. La semántica de los verificadores:
 //
-//	ExpectedTools    tools que deben aparecer EN ORDEN (subsecuencia) en el trace.
-//	MustContain      substrings que deben estar en la respuesta final.
-//	MustContainAny   al menos UNA de estas substrings debe estar (frases
-//	                 equivalentes: "no tengo datos" / "no hay información").
-//	MustNotContain   substrings que NO deben estar (detecta alucinaciones).
-//	Writes           true = el caso escribe en la DB (HITL): se saltea en el
-//	                 modo default para que las corridas sean read-only.
+//	ExpectedTools     tools que deben aparecer EN ORDEN (subsecuencia) en el trace.
+//	RequiredToolsAny  tools que deben aparecer TODAS, sin importar el orden.
+//	ForbiddenTools    tools que NO deben aparecer en el trace (discernimiento).
+//	MustContain       substrings que deben estar en la respuesta final.
+//	MustContainAny    al menos UNA de estas substrings debe estar (frases
+//	                  equivalentes: "no tengo datos" / "no hay información").
+//	MustNotContain    substrings que NO deben estar (detecta alucinaciones).
+//	Writes            true = el caso escribe en la DB (HITL): se saltea en el
+//	                  modo default para que las corridas sean read-only.
 type Case struct {
-	ID             string
-	Description    string
-	Question       string
-	ExpectedTools  []string
-	MustContain    []string
-	MustContainAny []string
-	MustNotContain []string
-	Writes         bool
+	ID              string
+	Description     string
+	Question        string
+	ExpectedTools   []string
+	RequiredToolsAny []string
+	ForbiddenTools  []string
+	MustContain     []string
+	MustContainAny  []string
+	MustNotContain  []string
+	Writes          bool
 }
 
 // Result es el outcome de un caso.
@@ -93,6 +97,34 @@ func runOne(ctx context.Context, ag *agent.Agent, c Case, tenantID domain.Tenant
 	// antes de decidir (exploración), las tools esperadas deben aparecer en
 	// ese orden dentro del trace completo.
 	checkExpectedTools(&res, c.ExpectedTools, answer.ToolCalls)
+
+	// 1b) Tools requeridas TODAS (cualquier orden): mide que un caso híbrido
+	// use ambos dominios, sin imponer el orden de la exploración.
+	for _, name := range c.RequiredToolsAny {
+		found := false
+		for _, call := range answer.ToolCalls {
+			if call == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			res.Failures = append(res.Failures, fmt.Sprintf("tool requerida %q no apareció en el trace", name))
+		}
+	}
+
+	// 1c) Tools prohibidas (discernimiento): cazan el cruce de dominio, p. ej.
+	// datos que disparan buscar_documentos o documentos que disparan tools de
+	// datos. Es la medición del router: el caso falla aunque la respuesta
+	// final sea correcta, porque eligió la tool equivocada.
+	for _, name := range c.ForbiddenTools {
+		for _, call := range answer.ToolCalls {
+			if call == name {
+				res.Failures = append(res.Failures, fmt.Sprintf(`tool %q no debía usarse (discernimiento)`, name))
+				break
+			}
+		}
+	}
 
 	// 2) Subcadenas obligatorias.
 	for _, want := range c.MustContain {
@@ -162,10 +194,12 @@ func Summarize(results []Result) Summary {
 			s.Failed++
 		}
 		// Tool accuracy: el caso pasó la verificación de tools aunque falle
-		// por contenido (medida de routing, la más valiosa del RAG).
+		// por contenido (medida de routing, la más valiosa del RAG). El fallo
+		// de discernimiento (tool prohibida usada) también es una decisión de
+		// routing equivocada: baja ToolAcc.
 		toolOK := true
 		for _, f := range r.Failures {
-			if strings.HasPrefix(f, "tools esperadas") {
+			if strings.HasPrefix(f, "tools esperadas") || strings.HasPrefix(f, `tool "`) {
 				toolOK = false
 				break
 			}

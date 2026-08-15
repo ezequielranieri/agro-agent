@@ -49,7 +49,8 @@ func (p ConsultarAplicacionesParams) validate() error {
 func ConsultarAplicaciones(s store.AplicacionStore) Tool {
 	return Tool{
 		Name:        "consultar_aplicaciones",
-		Description: "Consulta aplicaciones de insumos (herbicidas, fungicidas, fertilizantes) sobre lotes. Úsala para responder qué se aplicó o planificó, por lote, campaña, período o estado. Devuelve dosis, fechas y producto por aplicación.",
+		Description: "Consulta aplicaciones de insumos (herbicidas, fungicidas, fertilizantes) sobre lotes. Úsala para responder qué se aplicó o planificó, por lote, campaña, período o estado. Devuelve dosis, fechas y producto por aplicación." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -26,7 +26,8 @@ func (p ConsultarRendimientosParams) validate() error {
 func ConsultarRendimientos(s store.RendimientoStore) Tool {
 	return Tool{
 		Name:        "consultar_rendimientos",
-		Description: "Consulta rendimientos reales cosechados (tn/ha) por lote y campaña. Úsala para comparar el rendimiento entre campañas o ver el rinde histórico de un lote.",
+		Description: "Consulta rendimientos reales cosechados (tn/ha) por lote y campaña. Úsala para comparar el rendimiento entre campañas o ver el rinde histórico de un lote." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

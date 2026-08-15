@@ -30,7 +30,8 @@ type DetectarRetrasosParams struct {
 func DetectarRetrasos(s store.AplicacionStore, now func() time.Time) Tool {
 	return Tool{
 		Name:        "detectar_retrasos",
-		Description: "Detecta aplicaciones planificadas cuya fecha ya venció (con cuántos días de retraso). Úsala para responder '¿hay algún lote con retraso en las aplicaciones planificadas?'.",
+		Description: "Detecta aplicaciones planificadas cuya fecha ya venció (con cuántos días de retraso). Úsala para responder '¿hay algún lote con retraso en las aplicaciones planificadas?'." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

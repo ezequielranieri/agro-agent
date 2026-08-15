@@ -29,6 +29,7 @@ import (
 	"github.com/agro-agent/agro-agent/internal/embedding"
 	"github.com/agro-agent/agro-agent/internal/httpapi"
 	"github.com/agro-agent/agro-agent/internal/llm"
+	"github.com/agro-agent/agro-agent/internal/router"
 	"github.com/agro-agent/agro-agent/internal/store/pg"
 	"github.com/agro-agent/agro-agent/internal/tools"
 )
@@ -106,7 +107,7 @@ func main() {
 		tools.BuscarDocumentos(pg.NewDocumentoStore(conn), geminiEmbed),
 	)
 
-	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5})
+	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
 
 	// --- HTTP ----------------------------------------------------------------
 	verifier, err := auth.NewVerifier(jwtSecret)

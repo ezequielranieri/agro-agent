@@ -19,7 +19,8 @@ import (
 func ProgramarAplicacion(svc *approval.Service) Tool {
 	return Tool{
 		Name:        "programar_aplicacion",
-		Description: "PROGRAMA una aplicación de insumo sobre un lote (crea la planificación). NO ejecuta: crea una solicitud de aprobación pendiente que un agrónomo o admin debe aprobar. Usala cuando el usuario pide planificar/aplicar/programar un producto en un lote. Devuelve el id de la solicitud y su token de aprobación.",
+		Description: "PROGRAMA una aplicación de insumo sobre un lote (crea la planificación). NO ejecuta: crea una solicitud de aprobación pendiente que un agrónomo o admin debe aprobar. Usala cuando el usuario pide planificar/aplicar/programar un producto en un lote. Devuelve el id de la solicitud y su token de aprobación." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

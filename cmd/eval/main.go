@@ -29,6 +29,7 @@ import (
 	"github.com/agro-agent/agro-agent/internal/embedding"
 	"github.com/agro-agent/agro-agent/internal/eval"
 	"github.com/agro-agent/agro-agent/internal/llm"
+	"github.com/agro-agent/agro-agent/internal/router"
 	"github.com/agro-agent/agro-agent/internal/store/pg"
 	"github.com/agro-agent/agro-agent/internal/tools"
 )
@@ -84,7 +85,7 @@ func main() {
 		tools.ConsultarAprobaciones(approvalSvc),
 		tools.BuscarDocumentos(pg.NewDocumentoStore(conn), geminiEmbed),
 	)
-	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5})
+	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
 
 	// Tenant 1 (Cooperativa La Esperanza) con un agronomo, como en el demo.
 	results := eval.Run(ctx, ag, eval.GoldenSet, domain.TenantID(1), "2", "agronomo", !*includeWrites)

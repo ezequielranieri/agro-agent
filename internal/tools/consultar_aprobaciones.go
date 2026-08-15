@@ -31,7 +31,8 @@ type approvalView struct {
 func ConsultarAprobaciones(svc *approval.Service) Tool {
 	return Tool{
 		Name:        "consultar_aprobaciones",
-		Description: "Consulta el estado de las solicitudes de aprobación (pendientes, aprobadas, rechazadas, ejecutadas, vencidas) del tenant. Úsala cuando el usuario pregunta si se aprobó/ejecutó una solicitud o quiere ver las pendientes.",
+		Description: "Consulta el estado de las solicitudes de aprobación (pendientes, aprobadas, rechazadas, ejecutadas, vencidas) del tenant. Úsala cuando el usuario pregunta si se aprobó/ejecutó una solicitud o quiere ver las pendientes." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

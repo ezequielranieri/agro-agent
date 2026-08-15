@@ -53,7 +53,8 @@ type ResumenAplicaciones struct {
 func ResumirAplicaciones(s store.AplicacionStore, now func() time.Time) Tool {
 	return Tool{
 		Name:        "resumir_aplicaciones",
-		Description: "Genera un resumen de las aplicaciones ejecutadas en un rango de fechas: total, desglose por tipo de producto (herbicida/fungicida/insecticida/fertilizante) y lotes involucrados. Úsala para responder 'qué se aplicó en los últimos 30 días' o resúmenes por período.",
+		Description: "Genera un resumen de las aplicaciones ejecutadas en un rango de fechas: total, desglose por tipo de producto (herbicida/fungicida/insecticida/fertilizante) y lotes involucrados. Úsala para responder 'qué se aplicó en los últimos 30 días' o resúmenes por período." + discernimientoDatosSufijo,
+		Dominio:     DominioDatos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

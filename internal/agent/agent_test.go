@@ -21,15 +21,19 @@ type fakeProvider struct {
 	responses []llm.Response
 	callIndex int
 	calls     [][]llm.Message
+	// toolSchemas guarda el contrato de tools que recibió el LLM en cada
+	// llamada: permite verificar el filtrado por dominio del router.
+	toolSchemas [][]llm.ToolSchema
 }
 
-func (f *fakeProvider) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolSchema) (llm.Response, error) {
+func (f *fakeProvider) Chat(_ context.Context, messages []llm.Message, toolSchemas []llm.ToolSchema) (llm.Response, error) {
 	if f.callIndex >= len(f.responses) {
 		return llm.Response{}, errors.New("fake: sin respuestas guionadas")
 	}
 	r := f.responses[f.callIndex]
 	f.callIndex++
 	f.calls = append(f.calls, messages)
+	f.toolSchemas = append(f.toolSchemas, toolSchemas)
 	return r, nil
 }
 
@@ -220,4 +224,126 @@ func (f *fakeAplicacionStore) ListAplicaciones(_ context.Context, tid domain.Ten
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// dummyTool arma una tool inerte con dominio para testear el filtrado del
+// router sin tocar la DB ni el LLM real.
+func dummyTool(name string, dominio tools.Dominio) tools.Tool {
+	return tools.Tool{
+		Name:        name,
+		Description: name,
+		Dominio:     dominio,
+		ParamsSchema: map[string]any{
+			"type": "object",
+		},
+		Run: func(_ context.Context, _ json.RawMessage) (tools.Result, error) {
+			return tools.Result{}, nil
+		},
+	}
+}
+
+// fakeClasificador devuelve una clasificación fija (y opcionalmente un error)
+// para verificar cómo el agente aplica el filtrado por dominio.
+type fakeClasificador struct {
+	dominios  []tools.Dominio
+	err       error
+	llamadas  int
+	consultas []string
+}
+
+func (f *fakeClasificador) Clasificar(_ context.Context, consulta string) ([]tools.Dominio, error) {
+	f.llamadas++
+	f.consultas = append(f.consultas, consulta)
+	return f.dominios, f.err
+}
+
+// TestRun_RouterClasificaUnaVezYFiltraLasTools: el router decide [datos], así
+// que el LLM solo ve la tool de datos (no la de documentos). Además se
+// clasifica UNA vez y con la pregunta del usuario, no el historial.
+func TestRun_RouterClasificaUnaVezYFiltraLasTools(t *testing.T) {
+	reg := tools.NewRegistry(
+		dummyTool("tool_datos", tools.DominioDatos),
+		dummyTool("tool_docs", tools.DominioDocumentos),
+	)
+	provider := &fakeProvider{responses: []llm.Response{{Text: "ok"}}}
+	clasif := &fakeClasificador{dominios: []tools.Dominio{tools.DominioDatos}}
+	a := New(provider, reg, Options{Router: clasif})
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	if _, err := a.Run(ctx, nil, "¿Qué rindió el lote 12?"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if clasif.llamadas != 1 {
+		t.Errorf("el router debe clasificar UNA vez, lo hizo %d", clasif.llamadas)
+	}
+	if len(clasif.consultas) != 1 || clasif.consultas[0] != "¿Qué rindió el lote 12?" {
+		t.Errorf("el router recibió otra consulta: %v", clasif.consultas)
+	}
+	if len(provider.calls) != 1 {
+		t.Fatalf("se esperaba 1 llamada al LLM, hubo %d", len(provider.calls))
+	}
+	names := make([]string, 0, len(provider.toolSchemas[0]))
+	for _, s := range provider.toolSchemas[0] {
+		names = append(names, s.Name)
+	}
+	if len(names) != 1 || names[0] != "tool_datos" {
+		t.Errorf("el LLM debía ver solo tool_datos, vio: %v", names)
+	}
+}
+
+// TestRun_RouterIndefinidoExponeTodas: clasificación [] (indefinido) no
+// filtra: sesgo no barrera.
+func TestRun_RouterIndefinidoExponeTodas(t *testing.T) {
+	reg := tools.NewRegistry(
+		dummyTool("tool_datos", tools.DominioDatos),
+		dummyTool("tool_docs", tools.DominioDocumentos),
+	)
+	provider := &fakeProvider{responses: []llm.Response{{Text: "ok"}}}
+	a := New(provider, reg, Options{Router: &fakeClasificador{dominios: []tools.Dominio{}}})
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	if _, err := a.Run(ctx, nil, "hola"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(provider.toolSchemas[0]) != 2 {
+		t.Errorf("indefinido debe exponer todas las tools, vio %d", len(provider.toolSchemas[0]))
+	}
+}
+
+// TestRun_RouterErrorExponeTodas: si el clasificador falla, el agente expone
+// todo (el router jamás rompe la conversación).
+func TestRun_RouterErrorExponeTodas(t *testing.T) {
+	reg := tools.NewRegistry(
+		dummyTool("tool_datos", tools.DominioDatos),
+		dummyTool("tool_docs", tools.DominioDocumentos),
+	)
+	provider := &fakeProvider{responses: []llm.Response{{Text: "ok"}}}
+	a := New(provider, reg, Options{Router: &fakeClasificador{err: errors.New("boom")}})
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	if _, err := a.Run(ctx, nil, "cualquiera"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(provider.toolSchemas[0]) != 2 {
+		t.Errorf("error del router debe exponer todas las tools, vio %d", len(provider.toolSchemas[0]))
+	}
+}
+
+// TestRun_SinRouterExponeTodasLasTools: sin router el comportamiento es
+// exactamente el clásico: todas las tools al LLM en cada iteración.
+func TestRun_SinRouterExponeTodasLasTools(t *testing.T) {
+	reg := tools.NewRegistry(
+		dummyTool("tool_datos", tools.DominioDatos),
+		dummyTool("tool_docs", tools.DominioDocumentos),
+	)
+	provider := &fakeProvider{responses: []llm.Response{{Text: "ok"}}}
+	a := New(provider, reg, Options{})
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	if _, err := a.Run(ctx, nil, "cualquiera"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(provider.toolSchemas[0]) != 2 {
+		t.Errorf("sin router se exponen todas las tools, vio %d", len(provider.toolSchemas[0]))
+	}
 }

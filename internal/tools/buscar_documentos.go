@@ -46,7 +46,8 @@ type DocumentoResult struct {
 func BuscarDocumentos(docs store.DocumentoStore, emb embedding.Embedder) Tool {
 	return Tool{
 		Name:        "buscar_documentos",
-		Description: "Busca documentos técnicos de la cooperativa (manuales de buenas prácticas, protocolos de aplicación, informes de campaña) relevantes para la consulta. Úsala cuando la respuesta requiere procedimientos, recomendaciones o información documental que NO está en lotes, aplicaciones ni rendimientos. Devuelve los fragmentos más relevantes con su archivo de origen.",
+		Description: "Busca documentos técnicos de la cooperativa (manuales de buenas prácticas, protocolos de aplicación, informes de campaña) relevantes para la consulta. Úsala cuando la respuesta requiere procedimientos, recomendaciones o información documental que NO está en lotes, aplicaciones ni rendimientos. Devuelve los fragmentos más relevantes con su archivo de origen." + discernimientoDocumentosSufijo,
+		Dominio:     DominioDocumentos,
 		ParamsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

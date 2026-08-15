@@ -21,6 +21,7 @@ import (
 	"github.com/agro-agent/agro-agent/internal/embedding"
 	"github.com/agro-agent/agro-agent/internal/identity"
 	"github.com/agro-agent/agro-agent/internal/llm"
+	"github.com/agro-agent/agro-agent/internal/router"
 	"github.com/agro-agent/agro-agent/internal/store/pg"
 	"github.com/agro-agent/agro-agent/internal/tenant"
 	"github.com/agro-agent/agro-agent/internal/tools"
@@ -82,7 +83,7 @@ func main() {
 	)
 
 	// --- Orquestador ----------------------------------------------------------
-	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5})
+	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
 
 	// El middleware de auth inyecta tenant y actor (identity); sin HTTP, los
 	// fijamos acá para que las tools HITL tengan de quién registrar la acción.

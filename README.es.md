@@ -110,15 +110,34 @@ y devuelve el top-k por similitud cosena **dentro del tenant** — el LLM puede
 citar el archivo de origen, y los datos estructurados nunca se filtran a la
 búsqueda documental (ni viceversa).
 
+## Router de discernimiento
+
+El agente no le entrega al LLM todas las tools en cada iteración. Un
+clasificador determinista (`internal/router`, reglas de keywords sobre la
+consulta normalizada — minúsculas, sin acentos, match por palabra completa)
+decide el **dominio** de la pregunta — `datos` (DB) vs `documentos` (RAG) —
+y el orquestador expone **solo las tools de esos dominios**. Cada tool
+declara su dominio (`tools.Dominio`); las descripciones refuerzan la misma
+frontera ("usá X, NO Y"). Es un **sesgo, no una barrera**: las consultas
+inciertas reciben todas las tools y un fallo del router degrada al
+comportamiento actual. Resultado: menos llamadas mal enrutadas, menos ruido
+en el contexto del LLM, menor costo — y una garantía medible vía el
+`ForbiddenTools` del eval (no llamar al RAG para preguntas de datos, y
+viceversa).
+
 ## Evals
 
 `cmd/eval` corre un golden set (`internal/eval/cases.go`): cada caso verifica
 que la tool esperada aparezca **en orden** (subsecuencia, permite
-exploración), que la respuesta contenga los datos reales requeridos y — lo
-crítico — **no contenga números alucinados**. Los casos que escriben (HITL) se
-saltean por defecto para que las corridas de eval sean read-only. El harness
-es determinista en tests (provider fake con guion) y mide precisión de routing
-+ anti-alucinación contra el LLM real.
+exploración) o — para preguntas híbridas — que **todas las tools requeridas**
+aparezcan en cualquier orden, que la respuesta contenga los datos reales
+requeridos, que **nunca se llamen tools prohibidas** (discernimiento: las
+preguntas de datos no deben disparar el RAG, las documentales no deben
+disparar tools de datos) y — lo crítico — **no contenga números alucinados**.
+Los casos que escriben (HITL) se saltean por defecto para que las corridas de
+eval sean read-only. El harness es determinista en tests (provider fake con
+guion) y mide precisión de routing + anti-alucinación + discernimiento contra
+el LLM real.
 
 ## Modelo de seguridad
 
@@ -204,8 +223,9 @@ cuando está levantada, con el DSN por defecto. Todo verde hoy: build + vet +
 - [x] HTTP API — auth JWT, aislamiento de tenant, chat JSON + streaming SSE
 - [x] HITL — solicitudes de aprobación, tokens opacos, RBAC, re-validación, auditoría
 - [x] RAG — pgvector, `buscar_documentos`, `cmd/embed`
-- [x] Evals — golden set, harness de routing + anti-alucinación
-- [ ] Corrida live del eval (cuota diaria free tier) + prueba de discernimiento
+- [x] Router de discernimiento — clasificador determinista de dominio + exposición filtrada de tools
+- [x] Evals — golden set, harness de routing + anti-alucinación + discernimiento
+- [ ] Corrida live del eval (cuota diaria free tier)
 - [ ] Deploy (render.com, como agro-iam)
 
 ## Licencia
