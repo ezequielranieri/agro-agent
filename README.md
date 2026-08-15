@@ -174,7 +174,8 @@ GEMINI_API_KEY=... go run ./cmd/eval --writes   # include write cases
 | `POST` | `/api/v1/approvals/{id}/approve` | Bearer JWT, admin/agronomo | approve with token |
 | `POST` | `/api/v1/approvals/{id}/reject` | Bearer JWT, admin/agronomo | reject |
 
-Dev token (never in production): `go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo`.
+Dev token (never in production): `JWT_SECRET=... go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo`
+(the tool self-verifies the token against the real backend verifier before printing).
 
 ## Testing
 
