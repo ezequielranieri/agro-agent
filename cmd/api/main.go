@@ -86,6 +86,9 @@ func main() {
 
 	// --- Registro de tools (mismo wiring que cmd/demo) ----------------------
 	appsStore := pg.NewAplicacionStore(conn)
+	// El store de lotes se comparte entre la tool consultar_lotes y el
+	// endpoint GET /api/v1/lotes: una sola conexión, un solo estado.
+	loteStore := pg.NewLoteStore(conn)
 	// HITL: el service de aprobaciones une el store de solicitudes, los
 	// resolvers de lote/producto/campaña, el writer de aplicaciones y el
 	// auditor. TTL de 24h: la solicitud muere sola si nadie la aprueba.
@@ -98,7 +101,7 @@ func main() {
 	)
 	reg := tools.NewRegistry(
 		tools.ConsultarAplicaciones(appsStore),
-		tools.ConsultarLotes(pg.NewLoteStore(conn)),
+		tools.ConsultarLotes(loteStore),
 		tools.ConsultarRendimientos(pg.NewRendimientoStore(conn)),
 		tools.ResumirAplicaciones(appsStore, time.Now),
 		tools.DetectarRetrasos(appsStore, time.Now),
@@ -115,7 +118,7 @@ func main() {
 		log.Error("configurar auth", "err", err)
 		os.Exit(1)
 	}
-	srv := httpapi.New(ag, verifier, approvalSvc)
+	srv := httpapi.New(ag, verifier, approvalSvc, loteStore)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

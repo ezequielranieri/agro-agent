@@ -43,6 +43,41 @@ func TestListLotes_SinJoinNoDuplica(t *testing.T) {
 	}
 }
 
+func TestListLotesConCampanaActual_CadaLoteUnaVez(t *testing.T) {
+	s := NewLoteStore(testConn(t))
+	lotes, err := s.ListLotesConCampanaActual(context.Background(), domain.TenantID(1))
+	if err != nil {
+		t.Fatalf("ListLotesConCampanaActual: %v", err)
+	}
+	// 18 lotes, aunque varios participan en múltiples campañas: el LATERAL por
+	// max(campana_id) elige UNA campaña por lote sin duplicar.
+	if len(lotes) != 18 {
+		t.Fatalf("esperaba 18 lotes sin duplicar, obtuve %d", len(lotes))
+	}
+	for _, l := range lotes {
+		if l.CampanaNombre == "" || l.Cultivo == "" {
+			t.Errorf("lote sin campaña/cultivo actual: %+v", l)
+		}
+	}
+	// ORDER BY l.codigo: el primero es el lote 1, cuya campaña de mayor id es
+	// la 3 (2026/2027, trigo) — la actual del seed.
+	first := lotes[0]
+	if first.Codigo != "1" || first.CampanaNombre != "2026/2027" || first.Cultivo != "trigo" {
+		t.Errorf("lote 1: campaña actual inesperada: %+v", first)
+	}
+}
+
+func TestListLotesConCampanaActual_AislamientoTenant(t *testing.T) {
+	s := NewLoteStore(testConn(t))
+	lotes, err := s.ListLotesConCampanaActual(context.Background(), domain.TenantID(2))
+	if err != nil {
+		t.Fatalf("ListLotesConCampanaActual: %v", err)
+	}
+	if len(lotes) != 0 {
+		t.Fatalf("tenant 2 sin datos, obtuvo %d filas", len(lotes))
+	}
+}
+
 func TestListRendimientos_Lote12ComparaCampanas(t *testing.T) {
 	s := NewRendimientoStore(testConn(t))
 	rends, err := s.ListRendimientos(context.Background(), domain.TenantID(1), store.RendimientoFilters{

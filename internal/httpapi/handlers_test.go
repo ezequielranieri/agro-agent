@@ -92,7 +92,7 @@ func newTestServer(ag *agent.Agent, secret string) http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	return httpapi.New(ag, verifier, nil).Handler()
+	return httpapi.New(ag, verifier, nil, &fakeLoteStore{}).Handler()
 }
 
 func doChat(t *testing.T, h http.Handler, token, body, accept string) *httptest.ResponseRecorder {

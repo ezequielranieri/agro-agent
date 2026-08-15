@@ -15,6 +15,7 @@ import (
 	"github.com/agro-agent/agro-agent/internal/agent"
 	"github.com/agro-agent/agro-agent/internal/approval"
 	"github.com/agro-agent/agro-agent/internal/auth"
+	"github.com/agro-agent/agro-agent/internal/store"
 )
 
 // Server concentra las dependencias del transporte. El *agent.Agent es
@@ -25,18 +26,21 @@ type Server struct {
 	agent     *agent.Agent
 	verifier  *auth.Verifier
 	approvals *approval.Service
+	loteStore store.LoteStore
 	log       *slog.Logger
 }
 
 // New arma el server. El logger por defecto va a stdout con formato texto
 // (simple de leer en contenedores); los tests pueden inyectar uno distinto.
 // approvals puede ser nil (p. ej. tests de chat): los handlers de approvals
-// responden 501 y el resto del API no se ve afectado.
-func New(ag *agent.Agent, verifier *auth.Verifier, approvals *approval.Service) *Server {
+// responden 501 y el resto del API no se ve afectado. loteStore es requerido:
+// GET /api/v1/lotes lo consulta en cada request.
+func New(ag *agent.Agent, verifier *auth.Verifier, approvals *approval.Service, loteStore store.LoteStore) *Server {
 	return &Server{
 		agent:     ag,
 		verifier:  verifier,
 		approvals: approvals,
+		loteStore: loteStore,
 		log:       slog.New(slog.NewTextHandler(os.Stdout, nil)),
 	}
 }
@@ -50,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	// y rechazar (escritura) queda restringida a admin/agronomo. requireRole
 	// SIEMPRE va encadenado después de requireAuth (ver middleware.go).
 	mux.Handle("GET /api/v1/approvals", s.requireAuth(http.HandlerFunc(s.handleListApprovals)))
+	mux.Handle("GET /api/v1/lotes", s.requireAuth(http.HandlerFunc(s.handleListLotes)))
 	mux.Handle("POST /api/v1/approvals/{id}/approve", s.requireAuth(s.requireRole("admin", "agronomo")(http.HandlerFunc(s.handleApprove))))
 	mux.Handle("POST /api/v1/approvals/{id}/reject", s.requireAuth(s.requireRole("admin", "agronomo")(http.HandlerFunc(s.handleReject))))
 	// logging y recover envuelven TODO el mux: ningún request los esquiva.

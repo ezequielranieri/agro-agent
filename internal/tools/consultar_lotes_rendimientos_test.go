@@ -34,6 +34,17 @@ func (f *fakeLoteStore) ListLotes(_ context.Context, tid domain.TenantID, flt st
 	return out, nil
 }
 
+func (f *fakeLoteStore) ListLotesConCampanaActual(_ context.Context, tid domain.TenantID) ([]domain.Lote, error) {
+	var out []domain.Lote
+	for _, l := range f.lotes {
+		if l.TenantID != tid {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
+
 func seedLotes() []domain.Lote {
 	return []domain.Lote{
 		{ID: 1, TenantID: 1, Codigo: "1", Nombre: "El Rincón", SuperficieHa: 48.5, TipoSuelo: "franco-arcilloso", ResponsableID: 2, CampanaNombre: "2026/2027", Cultivo: "trigo"},

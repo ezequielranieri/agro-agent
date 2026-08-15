@@ -79,3 +79,49 @@ WHERE l.tenant_id = $1`
 	}
 	return lotes, nil
 }
+
+// ListLotesConCampanaActual devuelve los lotes del tenant con la campaña de
+// mayor id (la actual) y su cultivo. Un LATERAL con ORDER BY campana_id DESC
+// LIMIT 1 elige la campaña vigente por lote sin duplicar filas; el id es el
+// orden real de carga de campañas (la actual se crea con el id más alto). Es
+// un método aparte para NO tocar el contrato de ListLotes: la tool
+// consultar_lotes sigue con su regla de no unir sin filtros.
+func (s *LoteStore) ListLotesConCampanaActual(ctx context.Context, tid domain.TenantID) ([]domain.Lote, error) {
+	query := `
+SELECT l.id, l.tenant_id, l.codigo, l.nombre, l.superficie_ha, l.tipo_suelo, l.responsable_id,
+       COALESCE(c.nombre, ''), COALESCE(cl.cultivo, '')
+FROM lotes l
+LEFT JOIN LATERAL (
+    SELECT cl2.campana_id, cl2.cultivo
+    FROM campana_lotes cl2
+    WHERE cl2.tenant_id = l.tenant_id AND cl2.lote_id = l.id
+    ORDER BY cl2.campana_id DESC
+    LIMIT 1
+) cl ON TRUE
+LEFT JOIN campanas c ON c.tenant_id = l.tenant_id AND c.id = cl.campana_id
+WHERE l.tenant_id = $1
+ORDER BY l.codigo`
+	rows, err := s.conn.Query(ctx, query, tid)
+	if err != nil {
+		return nil, fmt.Errorf("pg: consulta de lotes con campaña actual: %w", err)
+	}
+	defer rows.Close()
+
+	var lotes []domain.Lote
+	for rows.Next() {
+		var l domain.Lote
+		// COALESCE arriba: un lote sin campana_lotes queda con string vacío,
+		// jamás NULL al scan (los campos del domain no son punteros).
+		if err := rows.Scan(
+			&l.ID, &l.TenantID, &l.Codigo, &l.Nombre, &l.SuperficieHa, &l.TipoSuelo, &l.ResponsableID,
+			&l.CampanaNombre, &l.Cultivo,
+		); err != nil {
+			return nil, fmt.Errorf("pg: scan de lote: %w", err)
+		}
+		lotes = append(lotes, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pg: iteración de lotes: %w", err)
+	}
+	return lotes, nil
+}
