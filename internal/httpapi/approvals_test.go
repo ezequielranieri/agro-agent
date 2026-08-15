@@ -113,7 +113,7 @@ func newApprovalsServer(t *testing.T, store *fakeApprovalStore) http.Handler {
 		t.Fatalf("verifier: %v", err)
 	}
 	ag := agent.New(&captureProvider{}, tools.NewRegistry(), agent.Options{})
-	return httpapi.New(ag, verifier, svc, &fakeLoteStore{}).Handler()
+	return httpapi.New(ag, verifier, svc, &fakeLoteStore{}, &fakeAplicacionStore{}).Handler()
 }
 
 // seedPendingRequest siembra una solicitud pendiente con token conocido y

@@ -52,7 +52,7 @@ func newLotesServer(loteStore *fakeLoteStore) http.Handler {
 		panic(err)
 	}
 	ag := agent.New(&captureProvider{}, tools.NewRegistry(), agent.Options{})
-	return httpapi.New(ag, verifier, nil, loteStore).Handler()
+	return httpapi.New(ag, verifier, nil, loteStore, &fakeAplicacionStore{}).Handler()
 }
 
 func doLotes(t *testing.T, h http.Handler, token string) *httptest.ResponseRecorder {

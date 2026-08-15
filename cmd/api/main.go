@@ -118,7 +118,7 @@ func main() {
 		log.Error("configurar auth", "err", err)
 		os.Exit(1)
 	}
-	srv := httpapi.New(ag, verifier, approvalSvc, loteStore)
+	srv := httpapi.New(ag, verifier, approvalSvc, loteStore, appsStore)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,
