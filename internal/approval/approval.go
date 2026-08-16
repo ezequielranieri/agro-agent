@@ -25,7 +25,6 @@ type Status string
 
 const (
 	StatusPending  Status = "pendiente"
-	StatusApproved Status = "aprobado"
 	StatusRejected Status = "rechazado"
 	StatusExecuted Status = "ejecutado"
 	StatusExpired  Status = "vencido"

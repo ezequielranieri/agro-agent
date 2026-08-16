@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +15,29 @@ import (
 	"github.com/agro-agent/agro-agent/internal/identity"
 	"github.com/agro-agent/agro-agent/internal/tenant"
 )
+
+// requestIDKey es la clave del contexto para el id de correlación del request.
+type requestIDKey struct{}
+
+// requestIDFromCtx devuelve el request_id del contexto, o "?" si no llegó a
+// generarse (defensa: el log es un dato, no el flujo).
+func requestIDFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(requestIDKey{}).(string); ok && v != "" {
+		return v
+	}
+	return "?"
+}
+
+// newRequestID genera un id corto de correlación (8 hex chars) con
+// crypto/rand, sin dependencias. Si el OS no proveyera entropía (imposible en
+// la práctica), cae a un timestamp para que el request jamás quede sin id.
+func newRequestID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return hex.EncodeToString(b[:])
+	}
+	return strconv.FormatInt(time.Now().UnixNano(), 16)
+}
 
 // writeJSONErr es el helper de errores JSON UNIFORMES: mismo shape, mismo
 // status, sin filtrar el detalle interno al cliente. El detalle real se
@@ -95,16 +121,30 @@ func (w *statusWriter) WriteHeader(code int) {
 // logging registra method, path, status y duración de cada request. Acepta
 // que WriteHeader se llame una sola vez (los handlers escriben un solo
 // status); si no se llama, el status queda 200.
+//
+// Correlación: si el cliente/proxy mandó un X-Request-ID se respeta (así un
+// request que atraviesa varios servicios se sigue con el mismo id); si no,
+// se genera uno local. El id viaja al log como request_id, se guarda en el
+// contexto (lo lee recover para el log de panics) y se devuelve al cliente
+// en el header de respuesta (clave para depurar un stream SSE cuyo cliente
+// se desconectó).
 func (s *Server) logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		rid := r.Header.Get("X-Request-ID")
+		if rid == "" {
+			rid = newRequestID()
+		}
+		w.Header().Set("X-Request-ID", rid)
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
+		ctx := context.WithValue(r.Context(), requestIDKey{}, rid)
+		next.ServeHTTP(sw, r.WithContext(ctx))
 		s.log.Info("http",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", sw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", rid,
 		)
 	})
 }
@@ -115,7 +155,7 @@ func (s *Server) recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.log.Error("http: panic recuperado", "err", rec, "path", r.URL.Path)
+				s.log.Error("http: panic recuperado", "err", rec, "path", r.URL.Path, "request_id", requestIDFromCtx(r.Context()))
 				writeJSONErr(w, http.StatusInternalServerError, "internal error")
 			}
 		}()

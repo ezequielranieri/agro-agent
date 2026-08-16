@@ -88,18 +88,3 @@ func (r *Registry) Defs() []Def {
 	}
 	return out
 }
-
-// Schemas devuelve las tools en el formato de tool calling del LLM
-// (OpenAI / Gemini compatibles).
-func (r *Registry) Schemas() []map[string]any {
-	defs := r.Defs()
-	out := make([]map[string]any, 0, len(defs))
-	for _, d := range defs {
-		out = append(out, map[string]any{
-			"name":        d.Name,
-			"description": d.Description,
-			"parameters":  d.Parameters,
-		})
-	}
-	return out
-}

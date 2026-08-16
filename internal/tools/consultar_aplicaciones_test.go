@@ -207,14 +207,11 @@ func TestRegistry_RegistraYExponeSchema(t *testing.T) {
 		t.Errorf("schema debe ser object, obtuve %v", got.ParamsSchema["type"])
 	}
 
-	schemas := reg.Schemas()
-	if len(schemas) != 1 || schemas[0]["name"] != "consultar_aplicaciones" {
-		t.Fatalf("schemas mal formados: %v", schemas)
+	defs := reg.Defs()
+	if len(defs) != 1 || defs[0].Name != "consultar_aplicaciones" {
+		t.Fatalf("defs mal formadas: %v", defs)
 	}
-	params, ok := schemas[0]["parameters"].(map[string]any)
-	if !ok {
-		t.Fatalf("faltan parameters en el schema")
-	}
+	params := defs[0].Parameters
 	if _, ok := params["properties"].(map[string]any)["lote_codigo"]; !ok {
 		t.Errorf("falta lote_codigo en properties")
 	}

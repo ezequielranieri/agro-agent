@@ -68,8 +68,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/aplicaciones", s.requireAuth(http.HandlerFunc(s.handleListAplicaciones)))
 	mux.Handle("POST /api/v1/approvals/{id}/approve", s.requireAuth(s.requireRole("admin", "agronomo")(http.HandlerFunc(s.handleApprove))))
 	mux.Handle("POST /api/v1/approvals/{id}/reject", s.requireAuth(s.requireRole("admin", "agronomo")(http.HandlerFunc(s.handleReject))))
-	// logging y recover envuelven TODO el mux: ningún request los esquiva.
-	return s.recover(s.logging(mux))
+	// logging (afuera) genera el request_id y lo deja en el contexto; recover
+	// (adentro) lo lee para el log de panics. Ningún request esquiva el log.
+	return s.logging(s.recover(mux))
 }
 
 // handleHealthz es el latido de orquestación (k8s, LB): no requiere auth ni
