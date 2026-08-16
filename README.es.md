@@ -148,7 +148,7 @@ el LLM real.
 | Autoridad de escritura | Tokens HITL: 32 bytes aleatorios opacos, guardados solo como SHA-256, comparación timing-safe |
 | Re-validación de contexto | Aprobar re-parsea el payload y re-resuelve los IDs dentro del tenant antes de insertar |
 | Comportamiento del modelo | Temperatura 0.2, prompt de sistema que prohíbe inventar datos, harness de evals que lo impone |
-| Auth | JWT HS256 verificado localmente, byte-compatible con los claims de agro-iam (`sub`/`tenant_id`/`role`, TTL 15 min); agro-agent nunca emite tokens |
+| Auth | JWT HS256 verificado localmente (`sub`/`tenant_id`/`role`, TTL 15 min); la demo emite tokens con `cmd/mktoken`, con la misma forma HS256/JWT que agro-iam. La conexión live con agro-iam **no** está implementada (ids de tenant UUID, códigos de rol en inglés) — ver [Integración con agro-iam](#integración-con-agro-iam). agro-agent nunca emite tokens por sí solo |
 
 ## Inicio rápido
 
@@ -168,7 +168,7 @@ go run ./cmd/embed
 go run ./cmd/api
 
 # sanity check
-curl http://localhost:8080/healthz   # -> {"status":"ok"}
+curl http://localhost:8080/healthz   # -> ok
 ```
 
 ### Demo CLI de un solo uso
@@ -189,22 +189,52 @@ GEMINI_API_KEY=... go run ./cmd/eval --writes   # incluir casos de escritura
 
 | Método | Ruta | Auth | Propósito |
 |---|---|---|---|
-| `GET` | `/healthz` | ninguna | liveness |
-| `POST` | `/api/v1/chat` | Bearer JWT | chat (JSON, o SSE con `Accept: text/event-stream`) |
+| `GET` | `/healthz` | ninguna | liveness (devuelve `ok`) |
+| `POST` | `/api/v1/chat` | Bearer JWT | chat (JSON, o SSE con `Accept: text/event-stream`); con límite de tasa por IP (default 10 req/min, `CHAT_RATE_LIMIT`) |
 | `GET` | `/api/v1/approvals?status=` | Bearer JWT | listar solicitudes |
 | `POST` | `/api/v1/approvals/{id}/approve` | Bearer JWT, admin/agronomo | aprobar con token |
 | `POST` | `/api/v1/approvals/{id}/reject` | Bearer JWT, admin/agronomo | rechazar |
+| `GET` | `/api/v1/lotes` | Bearer JWT | listar lotes |
+| `GET` | `/api/v1/aplicaciones` | Bearer JWT | listar aplicaciones |
 
 Token de desarrollo (nunca en producción): `JWT_SECRET=... go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo`
 (el tool se auto-verifica el token contra el verifier real del backend antes de imprimirlo).
 
+### Integración con agro-iam
+
+Estado honesto: agro-agent autentica contra el **mismo formato HS256/JWT** que
+usa agro-iam (`sub`/`tenant_id`/`role`, TTL 15 min), así que el flujo demo
+funciona con tokens emitidos por `cmd/mktoken` y las formas son deliberadamente
+compatibles. **La conexión live con agro-iam NO está implementada**: agro-iam
+usa `tenant_id` UUID y códigos de rol en inglés (`agronomist`/`producer`/...),
+mientras agro-agent espera un `tenant_id` entero y roles en español
+(`admin`/`agronomo`/`productor`). Un token real de agro-iam fallaría hoy aquí
+la verificación o los checks de rol. Cerrar esa brecha (parseo de tenant UUID +
+alineación de vocabulario de roles) es trabajo futuro; el código de auth en sí
+(`internal/auth`, `requireAuth`) queda intencionalmente sin cambios.
+
+### Cuota del LLM
+
+El free tier de Gemini es de 5 requests por minuto y 20 por día. El agente puede
+llamar al LLM hasta 5 veces por request (loop de tool calling) y el endpoint de
+chat tiene límite de tasa por IP (default 10 req/min, `CHAT_RATE_LIMIT`), pero
+en picos la cuota diaria puede agotarse igual — esperar errores
+`429`/`RESOURCE_EXHAUSTED` que la capa de proveedor reintenta una vez
+(acotada) antes de propagarlos.
+
 ## Testing
 
 `go test ./...` simple — sin testcontainers, sin testify. Los unit tests usan
-fakes (proveedor LLM con guion, stores falsos). Los tests de integración
-(`internal/store/pg`, `internal/approval`) corren contra la base de compose
-cuando está levantada, con el DSN por defecto. Todo verde hoy: build + vet +
-60+ tests.
+fakes (proveedor LLM con guion, stores falsos) y corren siempre. Los tests de
+integración (`internal/store/pg`, `internal/approval`) están **compuertados**
+detrás de `AGRO_TEST_DB` y se saltean por defecto — corren solo cuando la
+variable apunta a la base de compose:
+
+```bash
+AGRO_TEST_DB="postgres://postgres:postgres@localhost:5432/agro" go test ./internal/store/pg ./internal/approval -v
+```
+
+Todo verde hoy: build + vet + 60+ tests.
 
 ## Configuración (env)
 
@@ -213,7 +243,7 @@ cuando está levantada, con el DSN por defecto. Todo verde hoy: build + vet +
 | `AGRO_DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/agro` | DSN pgx |
 | `GEMINI_API_KEY` | — (requerida) | clave API Gemini (chat + embeddings) |
 | `GEMINI_EMBED_MODEL` | `gemini-embedding-2` | modelo de embeddings (768 dims vía dimensionalidad de salida) |
-| `JWT_SECRET` | — (requerida) | clave HS256 compartida con agro-iam |
+| `JWT_SECRET` | — (requerida) | clave HS256 para el JWT demo (`cmd/mktoken`); el valor `change-me` se rechaza al boot |
 | `PORT` | `8080` | puerto HTTP |
 
 ## Roadmap
@@ -227,6 +257,7 @@ cuando está levantada, con el DSN por defecto. Todo verde hoy: build + vet +
 - [x] Evals — golden set, harness de routing + anti-alucinación + discernimiento
 - [ ] Corrida live del eval (cuota diaria free tier)
 - [ ] Deploy (render.com, como agro-iam)
+- [ ] Conexión live con agro-iam — ids de tenant UUID + alineación de vocabulario de roles
 
 ## Licencia
 

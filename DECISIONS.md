@@ -43,15 +43,22 @@ the constraint level.
 project's threat model (the LLM is the attacker, not a compromised DBA) the
 context-carried tenant plus constraint-level protection is the right size.
 
-## AD-003 · Local JWT verification, byte-compatible with agro-iam
+## AD-003 · Local JWT verification, same HS256/JWT shape (not byte-compatible with agro-iam)
 
 **Status:** accepted · **Scope:** auth
 
-**Decision:** agro-agent *validates* HS256 JWTs issued by agro-iam
-(`internal/auth/verifier.go`), expecting the same claims (`sub`,
-`tenant_id`, `role`, `iat`, `exp`, 15 min TTL). It **never mints tokens** —
-`cmd/mktoken` is dev-only. The verifier rejects empty `sub`/`tenant_id` and an
-empty secret at boot.
+**Decision:** agro-agent *validates* HS256 JWTs with the same claim shape it
+issues via `cmd/mktoken` (`internal/auth/verifier.go`): `sub`, an integer
+`tenant_id`, `role` (`admin`/`agronomo`/`productor`), `iat`, `exp`, 15 min
+TTL. It **never mints tokens** — `cmd/mktoken` is dev-only. The verifier
+rejects empty `sub`/`tenant_id` and an empty secret at boot.
+
+agro-iam compatibility is **NOT implemented**: agro-iam uses UUID `tenant_id`s
+and English role codes (`agronomist`/`producer`/`auditor`/`hauler`), so a live
+agro-iam token would fail here today — 401 on the integer `tenant_id` parse
+(`strconv.ParseInt`) or 403 on the role check. Closing that gap (UUID tenant
+parsing + role vocabulary alignment) is future work, documented in the README
+Roadmap.
 
 **Why:** agro-iam is a separate module whose internals are not importable
 (they live in `internal/`). Validating locally with a shared `JWT_SECRET` is
@@ -59,7 +66,9 @@ the real microservice pattern: zero coupling, no auth network call per
 request.
 
 **Trade-off:** a compromised `JWT_SECRET` breaks both services; rotation must
-be coordinated. That's normal for HS256 shared-secret setups.
+be coordinated. That's normal for HS256 shared-secret setups. The honest
+caveat: agro-agent and agro-iam share a token *format*, not a token contract —
+live agro-iam tokens are not accepted until the claim vocabulary is aligned.
 
 ## AD-004 · Gemini model pinning + the thought_signature dance
 
@@ -181,6 +190,68 @@ closure for SSE streaming.
 immutable agent with per-request events is race-free by construction.
 
 **Trade-off:** one extra allocation per request — negligible.
+
+## AD-011 · Atomic HITL materialization (TOCTOU-safe approve)
+
+**Status:** accepted · **Scope:** internal/approval
+
+**Decision:** approve/reject run re-validation + a conditional
+`UPDATE ... WHERE status='pendiente'` + the application INSERT in ONE
+`pgx.Tx`. The loser of a concurrent approve gets 0 rows affected →
+`ErrNotPending` → HTTP 409; the transaction rolls back and no duplicate
+application row is written.
+
+**Why:** two concurrent approves with the same valid token previously both
+passed the read checks and duplicated the insert — flagship-feature data
+corruption.
+
+**Trade-off:** a slightly larger critical section; the applier port
+(`approval.Applier`) adds a small indirection layer. (Files:
+`internal/approval/pg/writer.go`, `internal/approval/service.go`,
+`internal/approval/approval.go`; test `TestConcurrentApprove_SoloUnaGana`.)
+
+## AD-012 · Bounded provider resilience (timeouts + single retry)
+
+**Status:** accepted · **Scope:** cmd/api, internal/agent, internal/llm
+
+**Decision:** `http.Server` gets `ReadHeaderTimeout` 10s / `IdleTimeout` 60s
+(NO global `ReadTimeout` — SSE chat needs long-lived connections). The agent
+loop wraps each `provider.Chat` in a 60s per-iteration context and checks
+`ctx.Err()` between iterations. The Gemini adapter does ONE bounded retry on
+429/5xx transient errors using the provider's `RetryInfo` delay, capped at 5s.
+
+**Why:** a hung provider call previously pinned a goroutine + a DB connection
+indefinitely, and a 429 instantly failed the chat.
+
+**Trade-off:** worst-case latency rises by the capped retry delay; a provider
+in permanent 429 still fails closed after one retry.
+
+## AD-013 · Per-IP chat rate limiting
+
+**Status:** accepted · **Scope:** internal/httpapi
+
+**Decision:** an in-memory token bucket on the chat route (default 10
+req/min/IP, env `CHAT_RATE_LIMIT`); over-limit requests get a 429 with
+`{"error":"rate limit exceeded"}`.
+
+**Why:** chat calls a paid LLM up to 5× per request with no guard; a loop
+could burn the quota or the bill.
+
+**Trade-off:** in-memory state is per-instance (fine for a single-process
+demo; would need a shared store for multi-instance).
+
+## AD-014 · Reject default JWT_SECRET at boot
+
+**Status:** accepted · **Scope:** cmd/api, internal/auth
+
+**Decision:** startup fails loudly if `JWT_SECRET` is empty OR the literal
+`"change-me"` (mirroring agro-iam).
+
+**Why:** `.env.example` ships `change-me`; accepting it runs HS256 with a
+publicly-known key.
+
+**Trade-off:** a dev copying the env file verbatim must pick a real secret —
+that's the point.
 
 ## Non-decisions (explicitly deferred)
 
