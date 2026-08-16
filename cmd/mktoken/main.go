@@ -8,6 +8,7 @@
 //
 //	JWT_SECRET=... go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo
 //	go run ./cmd/mktoken -secret "$JWT_SECRET" -tenant 1 -user 42 -role admin
+//	go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo -exp 24h   # dev local
 //
 // El secret sale de JWT_SECRET (env) o del flag -secret. El flag es el
 // fallback para shells sin env configurado; la env evita que el secret quede
@@ -42,6 +43,11 @@ func main() {
 	tenant := flag.String("tenant", "1", "TenantID (claim tenant_id)")
 	user := flag.String("user", "42", "UserID (claim sub)")
 	role := flag.String("role", "admin", "Rol (claim role)")
+	// La expiración corta por defecto es la segura para un emisor de prueba:
+	// un token largo olvidado en un shell o log es una ventana de abuso. El
+	// dev local explícitamente puede pedir más (p.ej. -exp 24h) cuando sabe
+	// que el token va a vivir en el .env.local del frontend un día entero.
+	exp := flag.Duration("exp", 15*time.Minute, "duración del token (p.ej. 24h para dev local)")
 	flag.Parse()
 
 	// El secret sale de la env primero (no ensucia el historial del shell);
@@ -62,7 +68,7 @@ func main() {
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   *user,
 			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(15 * time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(*exp)),
 		},
 	})
 	signed, err := token.SignedString([]byte(secretValue))
