@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/agent"
 	"github.com/agro-agent/agro-agent/internal/approval"
@@ -40,22 +40,24 @@ func main() {
 	if dsn == "" {
 		dsn = "postgres://postgres:postgres@localhost:5432/agro"
 	}
-	conn, err := pgx.Connect(ctx, dsn)
+	// Mismo wiring que cmd/api: un pool de conexiones compartido (thread-safe)
+	// por todos los stores, no una única *pgx.Conn.
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conectar a Postgres: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer pool.Close()
 
 	// --- Registro de tools: el corazón del sistema ---------------------------
-	appsStore := pg.NewAplicacionStore(conn)
+	appsStore := pg.NewAplicacionStore(pool)
 	// HITL (mismo wiring que cmd/api): la tool de escritura NO inserta directo;
 	// crea una solicitud que un admin/agronomo aprueba con su token.
 	approvalSvc := approval.New(
-		pg2.NewApprovalStore(conn),
-		pg2.NewResolver(conn),
-		pg2.NewApplicationWriter(conn),
-		pg2.NewAuditor(conn),
+		pg2.NewApprovalStore(pool),
+		pg2.NewResolver(pool),
+		pg2.NewApplicationWriter(pool),
+		pg2.NewAuditor(pool),
 		24*time.Hour,
 	)
 
@@ -73,13 +75,13 @@ func main() {
 	}
 	reg := tools.NewRegistry(
 		tools.ConsultarAplicaciones(appsStore),
-		tools.ConsultarLotes(pg.NewLoteStore(conn)),
-		tools.ConsultarRendimientos(pg.NewRendimientoStore(conn)),
+		tools.ConsultarLotes(pg.NewLoteStore(pool)),
+		tools.ConsultarRendimientos(pg.NewRendimientoStore(pool)),
 		tools.ResumirAplicaciones(appsStore, time.Now),
 		tools.DetectarRetrasos(appsStore, time.Now),
 		tools.ProgramarAplicacion(approvalSvc),
 		tools.ConsultarAprobaciones(approvalSvc),
-		tools.BuscarDocumentos(pg.NewDocumentoStore(conn), geminiEmbed),
+		tools.BuscarDocumentos(pg.NewDocumentoStore(pool), geminiEmbed),
 	)
 
 	// --- Orquestador ----------------------------------------------------------

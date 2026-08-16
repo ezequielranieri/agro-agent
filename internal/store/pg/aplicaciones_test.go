@@ -12,24 +12,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/store"
 )
 
-func testConn(t *testing.T) *pgx.Conn {
+// testConn entrega un *pgxpool.Pool compartido por todos los stores del test,
+// igual que el server real: es el tipo que esperan los constructores y el que
+// permite correr lecturas concurrentes sin pisarse.
+func testConn(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("AGRO_TEST_DB")
 	if dsn == "" {
 		t.Skip("AGRO_TEST_DB no definida; saltando test de integración")
 	}
-	conn, err := pgx.Connect(context.Background(), dsn)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatalf("conectar a Postgres: %v", err)
 	}
-	t.Cleanup(func() { _ = conn.Close(context.Background()) })
-	return conn
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 func mustDate(t *testing.T, s string) *time.Time {

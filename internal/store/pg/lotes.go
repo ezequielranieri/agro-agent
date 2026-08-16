@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/store"
 )
 
+// LoteStore comparte un *pgxpool.Pool con los demás adapters: el pool es
+// thread-safe y cada Query toma una conexión libre, lo que evita el choque
+// de "conn busy" cuando lotes/aplicaciones/approvals corren en paralelo.
 type LoteStore struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewLoteStore(conn *pgx.Conn) *LoteStore {
-	return &LoteStore{conn: conn}
+func NewLoteStore(pool *pgxpool.Pool) *LoteStore {
+	return &LoteStore{pool: pool}
 }
 
 func (s *LoteStore) ListLotes(ctx context.Context, tid domain.TenantID, f store.LoteFilters) ([]domain.Lote, error) {
@@ -49,7 +52,7 @@ WHERE l.tenant_id = $1`
 	}
 	query += ` ORDER BY l.codigo`
 
-	rows, err := s.conn.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pg: consulta de lotes: %w", err)
 	}
@@ -101,7 +104,7 @@ LEFT JOIN LATERAL (
 LEFT JOIN campanas c ON c.tenant_id = l.tenant_id AND c.id = cl.campana_id
 WHERE l.tenant_id = $1
 ORDER BY l.codigo`
-	rows, err := s.conn.Query(ctx, query, tid)
+	rows, err := s.pool.Query(ctx, query, tid)
 	if err != nil {
 		return nil, fmt.Errorf("pg: consulta de lotes con campaña actual: %w", err)
 	}

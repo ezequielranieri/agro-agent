@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/agent"
 	"github.com/agro-agent/agro-agent/internal/approval"
@@ -49,20 +49,22 @@ func main() {
 	}
 
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, dsn)
+	// Pool compartido, igual que cmd/api/cmd/demo: los stores ya no reciben
+	// una única *pgx.Conn sino el pool (thread-safe).
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "conectar a Postgres: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer pool.Close()
 
 	// Mismo wiring que cmd/demo + cmd/api.
-	appsStore := pg.NewAplicacionStore(conn)
+	appsStore := pg.NewAplicacionStore(pool)
 	approvalSvc := approval.New(
-		pg2.NewApprovalStore(conn),
-		pg2.NewResolver(conn),
-		pg2.NewApplicationWriter(conn),
-		pg2.NewAuditor(conn),
+		pg2.NewApprovalStore(pool),
+		pg2.NewResolver(pool),
+		pg2.NewApplicationWriter(pool),
+		pg2.NewAuditor(pool),
 		24*time.Hour,
 	)
 	gemini, err := llm.NewGemini(ctx, geminiKey, "gemini-3.6-flash")
@@ -77,13 +79,13 @@ func main() {
 	}
 	reg := tools.NewRegistry(
 		tools.ConsultarAplicaciones(appsStore),
-		tools.ConsultarLotes(pg.NewLoteStore(conn)),
-		tools.ConsultarRendimientos(pg.NewRendimientoStore(conn)),
+		tools.ConsultarLotes(pg.NewLoteStore(pool)),
+		tools.ConsultarRendimientos(pg.NewRendimientoStore(pool)),
 		tools.ResumirAplicaciones(appsStore, time.Now),
 		tools.DetectarRetrasos(appsStore, time.Now),
 		tools.ProgramarAplicacion(approvalSvc),
 		tools.ConsultarAprobaciones(approvalSvc),
-		tools.BuscarDocumentos(pg.NewDocumentoStore(conn), geminiEmbed),
+		tools.BuscarDocumentos(pg.NewDocumentoStore(pool), geminiEmbed),
 	)
 	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
 

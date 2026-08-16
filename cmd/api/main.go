@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/agent"
 	"github.com/agro-agent/agro-agent/internal/approval"
@@ -64,12 +64,16 @@ func main() {
 	}
 
 	// --- Persistencia -------------------------------------------------------
-	conn, err := pgx.Connect(ctx, dsn)
+	// El server HTTP atiende cada request en su propia goroutine y el frontend
+	// dispara lotes/approvals/aplicaciones en paralelo. Una única *pgx.Conn
+	// compartida NO es segura bajo ese paralelismo (choca con "conn busy" y
+	// devuelve 500). El pool reparte las llamadas entre varias conexiones.
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		log.Error("conectar a Postgres", "err", err)
 		os.Exit(1)
 	}
-	defer conn.Close(context.Background())
+	defer pool.Close()
 
 	// --- LLM + orquestador --------------------------------------------------
 	gemini, err := llm.NewGemini(ctx, geminiKey, "gemini-3.6-flash")
@@ -85,29 +89,31 @@ func main() {
 	}
 
 	// --- Registro de tools (mismo wiring que cmd/demo) ----------------------
-	appsStore := pg.NewAplicacionStore(conn)
+	// Todos los stores comparten el MISMO *pgxpool.Pool: el pool es thread-safe
+	// y entrega una conexión distinta por llamada concurrente.
+	appsStore := pg.NewAplicacionStore(pool)
 	// El store de lotes se comparte entre la tool consultar_lotes y el
-	// endpoint GET /api/v1/lotes: una sola conexión, un solo estado.
-	loteStore := pg.NewLoteStore(conn)
+	// endpoint GET /api/v1/lotes: un solo pool, un solo estado.
+	loteStore := pg.NewLoteStore(pool)
 	// HITL: el service de aprobaciones une el store de solicitudes, los
 	// resolvers de lote/producto/campaña, el writer de aplicaciones y el
 	// auditor. TTL de 24h: la solicitud muere sola si nadie la aprueba.
 	approvalSvc := approval.New(
-		pg2.NewApprovalStore(conn),
-		pg2.NewResolver(conn),
-		pg2.NewApplicationWriter(conn),
-		pg2.NewAuditor(conn),
+		pg2.NewApprovalStore(pool),
+		pg2.NewResolver(pool),
+		pg2.NewApplicationWriter(pool),
+		pg2.NewAuditor(pool),
 		24*time.Hour,
 	)
 	reg := tools.NewRegistry(
 		tools.ConsultarAplicaciones(appsStore),
 		tools.ConsultarLotes(loteStore),
-		tools.ConsultarRendimientos(pg.NewRendimientoStore(conn)),
+		tools.ConsultarRendimientos(pg.NewRendimientoStore(pool)),
 		tools.ResumirAplicaciones(appsStore, time.Now),
 		tools.DetectarRetrasos(appsStore, time.Now),
 		tools.ProgramarAplicacion(approvalSvc),
 		tools.ConsultarAprobaciones(approvalSvc),
-		tools.BuscarDocumentos(pg.NewDocumentoStore(conn), geminiEmbed),
+		tools.BuscarDocumentos(pg.NewDocumentoStore(pool), geminiEmbed),
 	)
 
 	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})

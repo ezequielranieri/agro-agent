@@ -7,18 +7,21 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/store"
 )
 
+// AplicacionStore usa un *pgxpool.Pool, NO un *pgx.Conn: el pool reparte cada
+// llamada entre varias conexiones y así los stores sobreviven al paralelismo
+// real del HTTP server (una *pgx.Conn única chocaría con "conn busy").
 type AplicacionStore struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewAplicacionStore(conn *pgx.Conn) *AplicacionStore {
-	return &AplicacionStore{conn: conn}
+func NewAplicacionStore(pool *pgxpool.Pool) *AplicacionStore {
+	return &AplicacionStore{pool: pool}
 }
 
 func (s *AplicacionStore) ListAplicaciones(ctx context.Context, tid domain.TenantID, f store.AplicacionFilters) ([]domain.Aplicacion, error) {
@@ -73,7 +76,7 @@ WHERE a.tenant_id = $1`
 
 	query += ` ORDER BY a.fecha_planificada NULLS LAST, a.id`
 
-	rows, err := s.conn.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pg: consulta de aplicaciones: %w", err)
 	}

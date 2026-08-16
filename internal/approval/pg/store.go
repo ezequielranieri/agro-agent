@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/approval"
 	"github.com/agro-agent/agro-agent/internal/domain"
@@ -18,19 +19,21 @@ import (
 
 // ApprovalStore persiste solicitudes de aprobación. La DB guarda el token
 // SOLO como hash: este adapter jamás lee ni escribe el token plano.
+// Opera sobre un *pgxpool.Pool compartido: listar/decidir/caducar en paralelo
+// es seguro porque cada operación toma una conexión propia del pool.
 type ApprovalStore struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewApprovalStore(conn *pgx.Conn) *ApprovalStore {
-	return &ApprovalStore{conn: conn}
+func NewApprovalStore(pool *pgxpool.Pool) *ApprovalStore {
+	return &ApprovalStore{pool: pool}
 }
 
 func (s *ApprovalStore) Create(ctx context.Context, tid domain.TenantID, actorID int64, action string, payload json.RawMessage, tokenHash string, expiresAt time.Time) (int64, error) {
 	// $1 SIEMPRE es el tenant. token_hash (no el token): la DB no puede
 	// filtrar el secreto ni siquiera ante una fuga de datos.
 	var id int64
-	err := s.conn.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 INSERT INTO approval_requests (tenant_id, actor_user_id, action, payload, token_hash, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id`,
@@ -46,7 +49,7 @@ func (s *ApprovalStore) GetByTenant(ctx context.Context, tid domain.TenantID, id
 	var r approval.Request
 	// payload viene como json.RawMessage (jsonb), los campos nullable como
 	// punteros: pgx mapea NULL a nil sin error.
-	err := s.conn.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 SELECT id, tenant_id, actor_user_id, action, payload, status, token_hash,
        expires_at, created_at, decided_by, decided_at, executed_at
 FROM approval_requests
@@ -80,7 +83,7 @@ WHERE tenant_id = $1`
 	}
 	query += ` ORDER BY created_at DESC`
 
-	rows, err := s.conn.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pg: listar solicitudes: %w", err)
 	}
@@ -106,7 +109,7 @@ WHERE tenant_id = $1`
 func (s *ApprovalStore) MarkExpired(ctx context.Context, tid domain.TenantID) (int, error) {
 	// La solicitud "muere sola": la marca vencida la hace el reloj de la DB
 	// (expires_at < now()) para que no queden pendientes zombies.
-	tag, err := s.conn.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 UPDATE approval_requests
 SET status = 'vencido'
 WHERE tenant_id = $1 AND status = 'pendiente' AND expires_at < now()`,
@@ -119,7 +122,7 @@ WHERE tenant_id = $1 AND status = 'pendiente' AND expires_at < now()`,
 }
 
 func (s *ApprovalStore) Decide(ctx context.Context, tid domain.TenantID, id, decidedBy int64, status approval.Status) error {
-	tag, err := s.conn.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 UPDATE approval_requests
 SET status = $3, decided_by = $4, decided_at = now(),
     executed_at = CASE WHEN $3 = 'ejecutado' THEN now() ELSE executed_at END

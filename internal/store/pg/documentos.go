@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/store"
@@ -14,16 +14,18 @@ import (
 
 // DocumentoStore es el adapter pg del puerto RAG. La búsqueda usa el índice
 // HNSW sobre la columna vector(768) y el operador <=> (distancia coseno).
+// Recibe un *pgxpool.Pool: el RAG y el resto del server comparten el pool y
+// cada consulta usa una conexión distinta, nunca una única *pgx.Conn.
 type DocumentoStore struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewDocumentoStore(conn *pgx.Conn) *DocumentoStore {
-	return &DocumentoStore{conn: conn}
+func NewDocumentoStore(pool *pgxpool.Pool) *DocumentoStore {
+	return &DocumentoStore{pool: pool}
 }
 
 func (s *DocumentoStore) ListSinEmbedding(ctx context.Context, tid domain.TenantID) ([]store.Documento, error) {
-	rows, err := s.conn.Query(ctx, `
+	rows, err := s.pool.Query(ctx, `
 SELECT id, tenant_id, filename, content_text, metadata
 FROM documentos
 WHERE tenant_id = $1 AND embedding IS NULL
@@ -54,7 +56,7 @@ ORDER BY id`, tid)
 }
 
 func (s *DocumentoStore) GuardarEmbedding(ctx context.Context, tid domain.TenantID, docID int64, vec []float32) error {
-	_, err := s.conn.Exec(ctx, `
+	_, err := s.pool.Exec(ctx, `
 UPDATE documentos
 SET embedding = $3::vector
 WHERE tenant_id = $1 AND id = $2`, tid, docID, vectorString(vec))
@@ -68,7 +70,7 @@ WHERE tenant_id = $1 AND id = $2`, tid, docID, vectorString(vec))
 // y expone score = 1 - distancia ∈ [0,1]. El filtro de tenant es ineludible:
 // el LLM jamás puede buscar fuera de su cooperativa.
 func (s *DocumentoStore) BuscarSimilares(ctx context.Context, tid domain.TenantID, vec []float32, limit int) ([]store.DocumentoSimilar, error) {
-	rows, err := s.conn.Query(ctx, `
+	rows, err := s.pool.Query(ctx, `
 SELECT id, tenant_id, filename, content_text, metadata,
        1 - (embedding <=> $3::vector) AS score
 FROM documentos

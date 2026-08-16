@@ -19,7 +19,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/embedding"
@@ -40,14 +40,16 @@ func main() {
 		dsn = "postgres://postgres:postgres@localhost:5432/agro"
 	}
 
-	conn, err := pgx.Connect(ctx, dsn)
+	// Pool de conexiones (igual que cmd/api): el adapter de documentos espera
+	// un *pgxpool.Pool compartido, thread-safe, en vez de una única *pgx.Conn.
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		log.Error("conectar a Postgres", "err", err)
 		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer pool.Close()
 
-	docsStore := pg2.NewDocumentoStore(conn)
+	docsStore := pg2.NewDocumentoStore(pool)
 	emb, err := embedding.NewGemini(ctx, geminiKey, os.Getenv("GEMINI_EMBED_MODEL"))
 	if err != nil {
 		log.Error("crear proveedor de embeddings", "err", err)
@@ -56,7 +58,7 @@ func main() {
 
 	// Indexamos por tenant: el RAG es multi-tenant, cada cooperativa indexa
 	// SOLO sus documentos.
-	tenantIDs, err := listTenantIDs(ctx, conn)
+	tenantIDs, err := listTenantIDs(ctx, pool)
 	if err != nil {
 		log.Error("listar tenants", "err", err)
 		os.Exit(1)
@@ -92,8 +94,8 @@ func main() {
 }
 
 // listTenantIDs devuelve los tenants que tienen al menos un documento.
-func listTenantIDs(ctx context.Context, conn *pgx.Conn) ([]int64, error) {
-	rows, err := conn.Query(ctx, `SELECT DISTINCT tenant_id FROM documentos ORDER BY tenant_id`)
+func listTenantIDs(ctx context.Context, pool *pgxpool.Pool) ([]int64, error) {
+	rows, err := pool.Query(ctx, `SELECT DISTINCT tenant_id FROM documentos ORDER BY tenant_id`)
 	if err != nil {
 		return nil, fmt.Errorf("listar tenants: %w", err)
 	}

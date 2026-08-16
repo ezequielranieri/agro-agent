@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/approval"
 	"github.com/agro-agent/agro-agent/internal/domain"
@@ -14,12 +15,14 @@ import (
 
 // ApplicationWriter es el ÚNICO punto de INSERT en aplicaciones del slice HITL.
 // Se alcanza solo tras aprobar con token válido y re-validar el contexto.
+// Usa un *pgxpool.Pool: insertar, resolver y auditar en paralelo nunca
+// comparten una misma conexión física (a diferencia de una única *pgx.Conn).
 type ApplicationWriter struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewApplicationWriter(conn *pgx.Conn) *ApplicationWriter {
-	return &ApplicationWriter{conn: conn}
+func NewApplicationWriter(pool *pgxpool.Pool) *ApplicationWriter {
+	return &ApplicationWriter{pool: pool}
 }
 
 func (w *ApplicationWriter) CreateAplicacion(ctx context.Context, tid domain.TenantID, _ int64, in approval.AplicacionInput) (domain.Aplicacion, error) {
@@ -32,7 +35,7 @@ func (w *ApplicationWriter) CreateAplicacion(ctx context.Context, tid domain.Ten
 	}
 
 	var id int64
-	err = w.conn.QueryRow(ctx, `
+	err = w.pool.QueryRow(ctx, `
 INSERT INTO aplicaciones (tenant_id, lote_id, campana_id, producto_id, estado,
                           dosis, unidad_dosis, fecha_planificada, notas)
 VALUES ($1, $2, $3, $4, 'planificada', $5, $6, $7, $8)
@@ -66,30 +69,30 @@ RETURNING id`,
 // Resolver traduce códigos/nombres de negocio a IDs, siempre acotado al tenant.
 // Un SELECT sin WHERE tenant_id resolvería el lote "12" de OTRA cooperativa.
 type Resolver struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewResolver(conn *pgx.Conn) *Resolver {
-	return &Resolver{conn: conn}
+func NewResolver(pool *pgxpool.Pool) *Resolver {
+	return &Resolver{pool: pool}
 }
 
 func (r *Resolver) ResolveLoteID(ctx context.Context, tid domain.TenantID, codigo string) (int64, error) {
-	return resolveID(ctx, r.conn, "lotes", "codigo", tid, codigo)
+	return resolveID(ctx, r.pool, "lotes", "codigo", tid, codigo)
 }
 
 func (r *Resolver) ResolveProductoID(ctx context.Context, tid domain.TenantID, nombre string) (int64, error) {
-	return resolveID(ctx, r.conn, "productos", "nombre", tid, nombre)
+	return resolveID(ctx, r.pool, "productos", "nombre", tid, nombre)
 }
 
 func (r *Resolver) ResolveCampanaID(ctx context.Context, tid domain.TenantID, nombre string) (int64, error) {
-	return resolveID(ctx, r.conn, "campanas", "nombre", tid, nombre)
+	return resolveID(ctx, r.pool, "campanas", "nombre", tid, nombre)
 }
 
-func resolveID(ctx context.Context, conn *pgx.Conn, table, column string, tid domain.TenantID, value string) (int64, error) {
+func resolveID(ctx context.Context, pool *pgxpool.Pool, table, column string, tid domain.TenantID, value string) (int64, error) {
 	var id int64
 	// Los nombres de tabla/columna salen de constantes locales (nunca de
 	// input): no hay lugar para inyección SQL.
-	err := conn.QueryRow(ctx,
+	err := pool.QueryRow(ctx,
 		fmt.Sprintf(`SELECT id FROM %s WHERE tenant_id = $1 AND %s = $2`, table, column),
 		tid, value,
 	).Scan(&id)
@@ -105,18 +108,18 @@ func resolveID(ctx context.Context, conn *pgx.Conn, table, column string, tid do
 // Auditor registra cada decisión de aprobación en audit_log. Fail-open: el
 // service ignora el error y solo loguea WARN, la acción ya está decidida.
 type Auditor struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewAuditor(conn *pgx.Conn) *Auditor {
-	return &Auditor{conn: conn}
+func NewAuditor(pool *pgxpool.Pool) *Auditor {
+	return &Auditor{pool: pool}
 }
 
 func (a *Auditor) Record(ctx context.Context, tid domain.TenantID, actorID int64, action, tool string, params, result any) error {
 	// pgx serializa a jsonb cualquier valor JSON-marshalable: un json.RawMessage
 	// (el payload ya codificado) entra directo; un struct (la aplicación creada)
 	// se marshalea en el camino.
-	_, err := a.conn.Exec(ctx, `
+	_, err := a.pool.Exec(ctx, `
 INSERT INTO audit_log (tenant_id, user_id, action, tool, params, result)
 VALUES ($1, $2, $3, $4, $5, $6)`,
 		tid, actorID, action, tool, params, result,

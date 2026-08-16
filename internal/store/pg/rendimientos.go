@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
 	"github.com/agro-agent/agro-agent/internal/store"
 )
 
+// RendimientoStore usa un *pgxpool.Pool (thread-safe) como todos los
+// adapters: las lecturas concurrentes del frontend no comparten un único
+// *pgx.Conn y por lo tanto no se pisan entre sí.
 type RendimientoStore struct {
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
-func NewRendimientoStore(conn *pgx.Conn) *RendimientoStore {
-	return &RendimientoStore{conn: conn}
+func NewRendimientoStore(pool *pgxpool.Pool) *RendimientoStore {
+	return &RendimientoStore{pool: pool}
 }
 
 func (s *RendimientoStore) ListRendimientos(ctx context.Context, tid domain.TenantID, f store.RendimientoFilters) ([]domain.Rendimiento, error) {
@@ -39,7 +42,7 @@ WHERE r.tenant_id = $1`
 	}
 	query += ` ORDER BY r.campana_id, r.lote_id`
 
-	rows, err := s.conn.Query(ctx, query, args...)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pg: consulta de rendimientos: %w", err)
 	}
