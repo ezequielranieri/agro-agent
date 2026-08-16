@@ -62,8 +62,7 @@ func main() {
 	appsStore := pg.NewAplicacionStore(pool)
 	approvalSvc := approval.New(
 		pg2.NewApprovalStore(pool),
-		pg2.NewResolver(pool),
-		pg2.NewApplicationWriter(pool),
+		pg2.NewApplier(pool),
 		pg2.NewAuditor(pool),
 		24*time.Hour,
 	)

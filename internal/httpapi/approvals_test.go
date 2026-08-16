@@ -74,21 +74,22 @@ func (f *fakeApprovalStore) Decide(_ context.Context, _ domain.TenantID, _ int64
 	return nil
 }
 
-type fakeApprovalResolver struct{}
-
-func (fakeApprovalResolver) ResolveLoteID(_ context.Context, _ domain.TenantID, _ string) (int64, error) {
-	return 1, nil
-}
-func (fakeApprovalResolver) ResolveProductoID(_ context.Context, _ domain.TenantID, _ string) (int64, error) {
-	return 1, nil
-}
-func (fakeApprovalResolver) ResolveCampanaID(_ context.Context, _ domain.TenantID, _ string) (int64, error) {
-	return 3, nil
+type fakeApprovalApplier struct {
+	store *fakeApprovalStore
 }
 
-type fakeApprovalWriter struct{}
-
-func (fakeApprovalWriter) CreateAplicacion(_ context.Context, _ domain.TenantID, _ int64, _ approval.AplicacionInput) (domain.Aplicacion, error) {
+func (a *fakeApprovalApplier) Apply(_ context.Context, _ domain.TenantID, id, _ int64, _ approval.AplicacionPayload) (domain.Aplicacion, error) {
+	// Replica la guarda condicional del pg adapter para los flujos HTTP: la
+	// solicitud debe seguir pendiente para materializarse.
+	req, ok := a.store.byID[id]
+	if !ok {
+		return domain.Aplicacion{}, approval.ErrNotFound
+	}
+	if req.Status != approval.StatusPending {
+		return domain.Aplicacion{}, approval.ErrNotPending
+	}
+	req.Status = approval.StatusExecuted
+	a.store.byID[id] = req
 	return domain.Aplicacion{ID: 77, TenantID: 1, Estado: "planificada"}, nil
 }
 
@@ -107,7 +108,7 @@ func seedTokenHash(token string) string {
 // newApprovalsServer arma el server HTTP completo (con approvals) sobre fakes.
 func newApprovalsServer(t *testing.T, store *fakeApprovalStore) http.Handler {
 	t.Helper()
-	svc := approval.New(store, fakeApprovalResolver{}, fakeApprovalWriter{}, fakeApprovalAuditor{}, time.Hour)
+	svc := approval.New(store, &fakeApprovalApplier{store: store}, fakeApprovalAuditor{}, time.Hour)
 	verifier, err := auth.NewVerifier("secret")
 	if err != nil {
 		t.Fatalf("verifier: %v", err)
@@ -251,5 +252,103 @@ func TestApprove_AprobacionYaEjecutada(t *testing.T) {
 	w := doApprove(t, h, token, "/api/v1/approvals/"+strconv.FormatInt(id, 10)+"/approve", `{"token":"tokensecreto"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("esperaba 409, obtuve %d", w.Code)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// handleReject: la cobertura HTTP del rechazo (mismo contrato que approve).
+// -----------------------------------------------------------------------------
+
+func TestReject_AdminConTokenCorrecto(t *testing.T) {
+	store := newApprovalStore()
+	id := seedPendingRequest(t, store, "tokensecreto")
+	h := newApprovalsServer(t, store)
+
+	token := signTestToken(t, "secret", "1", "admin")
+	w := doApprove(t, h, token, "/api/v1/approvals/"+strconv.FormatInt(id, 10)+"/reject", `{"token":"tokensecreto"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("esperaba 200, obtuve %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"status":"rechazado"`) {
+		t.Errorf("respuesta inesperada: %s", w.Body.String())
+	}
+}
+
+func TestReject_ProductorProhibido(t *testing.T) {
+	h := newApprovalsServer(t, newApprovalStore())
+	token := signTestToken(t, "secret", "1", "productor")
+	w := doApprove(t, h, token, "/api/v1/approvals/1/reject", `{"token":"tokensecreto"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("esperaba 403, obtuve %d", w.Code)
+	}
+}
+
+func TestReject_IdNoNumerico(t *testing.T) {
+	h := newApprovalsServer(t, newApprovalStore())
+	token := signTestToken(t, "secret", "1", "admin")
+	w := doApprove(t, h, token, "/api/v1/approvals/abc/reject", `{"token":"x"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("esperaba 400, obtuve %d", w.Code)
+	}
+}
+
+func TestReject_BodyInvalido(t *testing.T) {
+	store := newApprovalStore()
+	id := seedPendingRequest(t, store, "tokensecreto")
+	h := newApprovalsServer(t, store)
+	token := signTestToken(t, "secret", "1", "admin")
+	path := "/api/v1/approvals/" + strconv.FormatInt(id, 10) + "/reject"
+
+	cases := []struct{ name, body string }{
+		{"token vacío", `{"token":""}`},
+		{"campo desconocido", `{"token":"tokensecreto","tenant_id":1}`},
+		{"JSON malformado", `{no-es-json`},
+	}
+	for _, c := range cases {
+		w := doApprove(t, h, token, path, c.body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: esperaba 400, obtuve %d (%s)", c.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestReject_TokenIncorrecto(t *testing.T) {
+	store := newApprovalStore()
+	id := seedPendingRequest(t, store, "tokensecreto")
+	h := newApprovalsServer(t, store)
+
+	token := signTestToken(t, "secret", "1", "agronomo")
+	w := doApprove(t, h, token, "/api/v1/approvals/"+strconv.FormatInt(id, 10)+"/reject", `{"token":"token-mal"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("esperaba 409, obtuve %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no aprobable") {
+		t.Errorf("error no uniforme: %s", w.Body.String())
+	}
+}
+
+func TestReject_YaRechazada(t *testing.T) {
+	// Estado no pendiente → 409 uniforme (no 500).
+	store := newApprovalStore()
+	id := seedPendingRequest(t, store, "tokensecreto")
+	req, _ := store.GetByTenant(context.Background(), domain.TenantID(1), id)
+	req.Status = approval.StatusRejected
+	store.byID[id] = *req
+	h := newApprovalsServer(t, store)
+
+	token := signTestToken(t, "secret", "1", "agronomo")
+	w := doApprove(t, h, token, "/api/v1/approvals/"+strconv.FormatInt(id, 10)+"/reject", `{"token":"tokensecreto"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("esperaba 409, obtuve %d", w.Code)
+	}
+}
+
+func TestReject_NotImplemented(t *testing.T) {
+	// Server con approvals en nil (slice HITL desmontado): 501, no 500.
+	h := newTestServer(agent.New(&captureProvider{}, tools.NewRegistry(), agent.Options{}), "secret")
+	token := signTestToken(t, "secret", "1", "admin")
+	w := doApprove(t, h, token, "/api/v1/approvals/1/reject", `{"token":"x"}`)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("esperaba 501, obtuve %d", w.Code)
 	}
 }

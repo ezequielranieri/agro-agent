@@ -28,6 +28,7 @@ type Server struct {
 	approvals       *approval.Service
 	loteStore       store.LoteStore
 	aplicacionStore store.AplicacionStore
+	limiter         *rateLimiter
 	log             *slog.Logger
 }
 
@@ -44,7 +45,10 @@ func New(ag *agent.Agent, verifier *auth.Verifier, approvals *approval.Service, 
 		approvals:       approvals,
 		loteStore:       loteStore,
 		aplicacionStore: aplicacionStore,
-		log:             slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		// Rate limit por IP del chat (el endpoint llama a un LLM pago). La
+		// cuota sale de CHAT_RATE_LIMIT (requests/min) o del default.
+		limiter: newRateLimiter(rateLimitFromEnv()),
+		log:     slog.New(slog.NewTextHandler(os.Stdout, nil)),
 	}
 }
 
@@ -52,7 +56,10 @@ func New(ag *agent.Agent, verifier *auth.Verifier, approvals *approval.Service, 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.Handle("POST /api/v1/chat", s.requireAuth(http.HandlerFunc(s.handleChat)))
+	// rateLimit va DENTRO de requireAuth: los requests sin token mueren en 401
+	// sin gastar cuota. El 429 del límite es JSON (no SSE) y el frontend lo
+	// muestra como mensaje amigable.
+	mux.Handle("POST /api/v1/chat", s.requireAuth(s.rateLimit(http.HandlerFunc(s.handleChat))))
 	// HITL: la lectura de solicitudes es para todo tenant autenticado; aprobar
 	// y rechazar (escritura) queda restringida a admin/agronomo. requireRole
 	// SIEMPRE va encadenado después de requireAuth (ver middleware.go).

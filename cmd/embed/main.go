@@ -10,7 +10,7 @@
 //
 //	AGRO_DATABASE_URL  DSN de Postgres (default local del dev).
 //	GEMINI_API_KEY     clave del proveedor (REQUERIDA).
-//	GEMINI_EMBED_MODEL modelo de embeddings (default text-embedding-004).
+//	GEMINI_EMBED_MODEL modelo de embeddings (default gemini-embedding-2).
 package main
 
 import (

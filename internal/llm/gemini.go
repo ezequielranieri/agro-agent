@@ -3,7 +3,10 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -17,7 +20,7 @@ type Gemini struct {
 }
 
 // NewGemini crea el adapter. apiKey vacía no falla acá (el SDK la lee de
-// GEMINI_API_KEY / GOOGLE_API_KEY); model vacío usa gemini-2.0-flash.
+// GEMINI_API_KEY / GOOGLE_API_KEY); model vacío usa gemini-3.6-flash.
 func NewGemini(ctx context.Context, apiKey, model string) (*Gemini, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
@@ -52,7 +55,22 @@ func (g *Gemini) Chat(ctx context.Context, messages []Message, tools []ToolSchem
 
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, config)
 	if err != nil {
-		return Response{}, fmt.Errorf("llm: Gemini: %w", err)
+		// Reintento único y acotado SOLO ante errores transitorios del
+		// proveedor (429/5xx): un 400 es un error del contrato, reintentarlo
+		// no cambia nada. La espera respeta el RetryInfo del error (tope 5s)
+		// y se corta si el contexto muere mientras tanto.
+		if !retryableAPIError(err) {
+			return Response{}, fmt.Errorf("llm: Gemini: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return Response{}, fmt.Errorf("llm: Gemini: %w", err)
+		case <-time.After(retryDelayOf(err)):
+		}
+		resp, err = g.client.Models.GenerateContent(ctx, g.model, contents, config)
+		if err != nil {
+			return Response{}, fmt.Errorf("llm: Gemini: %w", err)
+		}
 	}
 	if resp == nil {
 		return Response{}, nil
@@ -155,3 +173,66 @@ func toGeminiTools(tools []ToolSchema) []*genai.Tool {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// maxRetryDelay acota la espera entre reintentos: el agente no debe quedarse
+// bloqueado por un backoff sugerido por el proveedor (seguridad de latencia).
+const maxRetryDelay = 5 * time.Second
+
+// retryableAPIError decide si el error del proveedor amerita reintento. Solo
+// los transitorios: 429 (cuota/rate limit) y 5xx (fallo del proveedor). Cualquier
+// otro 4xx es un error de contrato y reintentarlo no lo arregla.
+func retryableAPIError(err error) bool {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		// Error de transporte (red/timeout): transitorio, vale reintentar.
+		return true
+	}
+	switch apiErr.Code {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// retryDelayOf extrae la sugerencia de espera del error del proveedor: el
+// detalle RetryInfo de la API de Google (formato protobuf-Duration). Acotada
+// a maxRetryDelay. Sin sugerencia, cae a 1s.
+func retryDelayOf(err error) time.Duration {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		return time.Second
+	}
+	for _, detail := range apiErr.Details {
+		wait := parseRetryDelay(detail["retryDelay"])
+		if wait <= 0 {
+			continue
+		}
+		if wait > maxRetryDelay {
+			wait = maxRetryDelay
+		}
+		return wait
+	}
+	return time.Second
+}
+
+// parseRetryDelay interpreta el retryDelay del detalle: el JSON de
+// google.protobuf.Duration es un string ("30s") o un objeto con seconds/nanos.
+func parseRetryDelay(v any) time.Duration {
+	switch d := v.(type) {
+	case string:
+		dur, err := time.ParseDuration(d)
+		if err != nil {
+			return 0
+		}
+		return dur
+	case map[string]any:
+		secs, _ := d["seconds"].(float64)
+		nanos, _ := d["nanos"].(float64)
+		return time.Duration(secs)*time.Second + time.Duration(nanos)
+	}
+	return 0
+}

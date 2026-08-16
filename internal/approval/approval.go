@@ -61,33 +61,14 @@ type Store interface {
 	Decide(ctx context.Context, tid domain.TenantID, id, decidedBy int64, status Status) error
 }
 
-// Resolver traduce los identificadores de negocio que mencionó el usuario
-// (código de lote, nombre de producto/campaña) a los IDs de la DB, SIEMPRE
-// acotado al tenant: la re-validación al aprobar no puede resolver un lote de
-// otra cooperativa.
-type Resolver interface {
-	ResolveLoteID(ctx context.Context, tid domain.TenantID, codigo string) (int64, error)
-	ResolveProductoID(ctx context.Context, tid domain.TenantID, nombre string) (int64, error)
-	ResolveCampanaID(ctx context.Context, tid domain.TenantID, nombre string) (int64, error)
-}
-
-// AplicacionInput son los datos ya validados y resueltos para insertar la
-// aplicación planificada. El estado SIEMPRE es 'planificada': el HITL
-// planifica; ejecutar es un flujo futuro.
-type AplicacionInput struct {
-	LoteID           int64
-	CampanaID        int64
-	ProductoID       int64
-	Dosis            float64
-	UnidadDosis      string
-	FechaPlanificada string // YYYY-MM-DD, ya validada
-	Notas            string
-}
-
-// ApplicationWriter inserta la aplicación aprobada. Es el ÚNICO punto de
-// escritura en el slice: sin aprobación no hay INSERT.
-type ApplicationWriter interface {
-	CreateAplicacion(ctx context.Context, tid domain.TenantID, actorID int64, in AplicacionInput) (domain.Aplicacion, error)
+// Applier materializa una aprobación DENTRO de UNA transacción: re-valida el
+// contexto (resuelve lote/producto/campaña acotados al tenant), decide la
+// solicitud con guarda condicional (solo una fila 'pendiente' puede pasar a
+// 'ejecutado') e inserta la aplicación. Al estar todo en la misma transacción,
+// solo el ganador de la carrera commitea: dos approves concurrentes con el
+// mismo token válido NO pueden insertar una aplicación duplicada.
+type Applier interface {
+	Apply(ctx context.Context, tid domain.TenantID, id, decidedBy int64, p AplicacionPayload) (domain.Aplicacion, error)
 }
 
 // Auditor registra cada decisión (aprobó/rechazó). Es fail-open por diseño:

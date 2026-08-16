@@ -63,6 +63,12 @@ func DetectarRetrasos(s store.AplicacionStore, now func() time.Time) Tool {
 
 			retrasos := make([]Retraso, 0, len(apps))
 			for _, a := range apps {
+				// fecha_planificada es nullable en el schema: una fila sin
+				// fecha no está "atrasada", se saltea (nunca dereferenciar un
+				// puntero nil y reventar con un panic).
+				if a.FechaPlanificada == nil {
+					continue
+				}
 				dias := int(hoy.Sub(*a.FechaPlanificada).Hours() / 24)
 				retrasos = append(retrasos, Retraso{
 					LoteCodigo:       a.LoteCodigo,

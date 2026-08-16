@@ -122,19 +122,25 @@ WHERE tenant_id = $1 AND status = 'pendiente' AND expires_at < now()`,
 }
 
 func (s *ApprovalStore) Decide(ctx context.Context, tid domain.TenantID, id, decidedBy int64, status approval.Status) error {
+	// La guarda condicional AND status = 'pendiente' es la transición atómica:
+	// dos decisiones concurrentes sobre la misma solicitud NO pueden ganar las
+	// dos. La segunda actualiza 0 filas y recibe ErrNotPending (409 en HTTP),
+	// no un 500.
 	tag, err := s.pool.Exec(ctx, `
 UPDATE approval_requests
 SET status = $3, decided_by = $4, decided_at = now(),
     executed_at = CASE WHEN $3 = 'ejecutado' THEN now() ELSE executed_at END
-WHERE tenant_id = $1 AND id = $2`,
+WHERE tenant_id = $1 AND id = $2 AND status = 'pendiente'`,
 		tid, id, status, decidedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("pg: decidir solicitud: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		// La fila no existe (o es de otro tenant): la solicitud no está en juego.
-		return approval.ErrNotFound
+		// El service ya validó existencia y tenant vía GetByTenant; cero filas
+		// aquí solo puede significar que la solicitud dejó de estar pendiente
+		// (otra decisión ganó la carrera).
+		return approval.ErrNotPending
 	}
 	return nil
 }

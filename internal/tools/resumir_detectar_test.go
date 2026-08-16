@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/agro-agent/agro-agent/internal/domain"
+	"github.com/agro-agent/agro-agent/internal/store"
 	"github.com/agro-agent/agro-agent/internal/tenant"
 )
 
@@ -94,5 +95,26 @@ func TestDetectarRetrasos_SinTenantFalla(t *testing.T) {
 	tool := DetectarRetrasos(&fakeAplicacionStore{apps: seedApps()}, fixedNow)
 	if _, err := runTool(t, tool, context.Background(), map[string]any{}); err == nil {
 		t.Fatal("esperaba error sin tenant en contexto")
+	}
+}
+
+// nilFechaStore devuelve una aplicación con fecha_planificada NULL aunque el
+// filtro no la excluya: la tool debe SALTEARLA (jamás dereferenciar el nil).
+type nilFechaStore struct{}
+
+func (nilFechaStore) ListAplicaciones(context.Context, domain.TenantID, store.AplicacionFilters) ([]domain.Aplicacion, error) {
+	return []domain.Aplicacion{{ID: 1, TenantID: 1, LoteCodigo: "9", Producto: "Glifosato 48%", Notas: "sin fecha"}}, nil
+}
+
+func TestDetectarRetrasos_SaltaNilFechaPlanificada(t *testing.T) {
+	tool := DetectarRetrasos(nilFechaStore{}, fixedNow)
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	res, err := runTool(t, tool, ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(res.Data.([]Retraso)); got != 0 {
+		t.Fatalf("una fila sin fecha no es retraso, obtuve %d", got)
 	}
 }

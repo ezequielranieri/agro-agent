@@ -145,7 +145,7 @@ LLM.
 | Write authority | HITL tokens: opaque 32-byte random, stored as SHA-256 only, timing-safe compare |
 | Context re-validation | Approve re-parses the payload and re-resolves IDs inside the tenant before inserting |
 | Model behavior | Temperature 0.2, system prompt forbids inventing data, eval harness enforces it |
-| Auth | HS256 JWT verified locally, byte-compatible with agro-iam's claims (`sub`/`tenant_id`/`role`, 15 min TTL); agro-agent never mints tokens |
+| Auth | HS256 JWT verified locally (`sub`/`tenant_id`/`role`, 15 min TTL); the demo issues tokens with `cmd/mktoken`, same HS256/JWT shape as agro-iam. Live agro-iam wiring is **not** implemented (UUID tenant ids, English role codes) — see [Integration with agro-iam](#integration-with-agro-iam). agro-agent never mints tokens on its own |
 
 ## Quickstart
 
@@ -165,7 +165,7 @@ go run ./cmd/embed
 go run ./cmd/api
 
 # sanity check
-curl http://localhost:8080/healthz   # -> {"status":"ok"}
+curl http://localhost:8080/healthz   # -> ok
 ```
 
 ### One-shot CLI demo
@@ -186,22 +186,50 @@ GEMINI_API_KEY=... go run ./cmd/eval --writes   # include write cases
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/healthz` | none | liveness |
-| `POST` | `/api/v1/chat` | Bearer JWT | chat (JSON, or SSE with `Accept: text/event-stream`) |
+| `GET` | `/healthz` | none | liveness (plain `ok`) |
+| `POST` | `/api/v1/chat` | Bearer JWT | chat (JSON, or SSE with `Accept: text/event-stream`); rate-limited per IP (default 10 req/min, `CHAT_RATE_LIMIT`) |
 | `GET` | `/api/v1/approvals?status=` | Bearer JWT | list approval requests |
 | `POST` | `/api/v1/approvals/{id}/approve` | Bearer JWT, admin/agronomo | approve with token |
 | `POST` | `/api/v1/approvals/{id}/reject` | Bearer JWT, admin/agronomo | reject |
+| `GET` | `/api/v1/lotes` | Bearer JWT | list lots |
+| `GET` | `/api/v1/aplicaciones` | Bearer JWT | list applications |
 
 Dev token (never in production): `JWT_SECRET=... go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo`
 (the tool self-verifies the token against the real backend verifier before printing).
 
+### Integration with agro-iam
+
+Honest status: agro-agent authenticates against the **same HS256/JWT format**
+agro-iam uses (`sub`/`tenant_id`/`role`, 15 min TTL), so the demo flow works
+with `cmd/mktoken`-issued tokens and the shapes are deliberately compatible.
+**Live agro-iam wiring is NOT implemented**: agro-iam uses UUID `tenant_id`s
+and English role codes (`agronomist`/`producer`/...), while agro-agent expects
+an integer `tenant_id` and Spanish roles (`admin`/`agronomo`/`productor`). A
+real agro-iam token would fail verification or role checks here today. Closing
+that gap (UUID tenant parsing + role vocabulary alignment) is future work; the
+auth code itself (`internal/auth`, `requireAuth`) is intentionally unchanged.
+
+### LLM quota
+
+The free tier of Gemini is 5 requests/minute and 20/day. The agent can call
+the LLM up to 5 times per request (tool-calling loop) and the chat endpoint is
+rate-limited per IP (default 10 req/min, `CHAT_RATE_LIMIT`), but at peak the
+daily quota can still be exhausted — expect `429`/`RESOURCE_EXHAUSTED` errors
+that the provider layer retries once (bounded) before surfacing.
+
 ## Testing
 
 Plain `go test ./...` — no testcontainers, no testify. Unit tests use fakes
-(scripted LLM provider, fake stores). Integration tests
-(`internal/store/pg`, `internal/approval`) run against the compose database
-when it's up; `TestMain`-free — they use a live connection via the default
-DSN. All green today: build + vet + 60+ tests.
+(scripted LLM provider, fake stores) and always run. Integration tests
+(`internal/store/pg`, `internal/approval`) are **gated** behind `AGRO_TEST_DB`
+and skip by default — they run only when the env var points to the compose
+database:
+
+```bash
+AGRO_TEST_DB="postgres://postgres:postgres@localhost:5432/agro" go test ./internal/store/pg ./internal/approval -v
+```
+
+All green today: build + vet + 60+ tests.
 
 ## Configuration (env)
 
@@ -210,7 +238,7 @@ DSN. All green today: build + vet + 60+ tests.
 | `AGRO_DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/agro` | pgx DSN |
 | `GEMINI_API_KEY` | — (required) | Gemini API key (chat + embeddings) |
 | `GEMINI_EMBED_MODEL` | `gemini-embedding-2` | embeddings model (768 dims via output dimensionality) |
-| `JWT_SECRET` | — (required) | HS256 key shared with agro-iam |
+| `JWT_SECRET` | — (required) | HS256 key for demo JWT (`cmd/mktoken`); the value `change-me` is rejected at startup |
 | `PORT` | `8080` | HTTP bind port |
 
 ## Roadmap
@@ -224,6 +252,7 @@ DSN. All green today: build + vet + 60+ tests.
 - [x] Evals — golden set, tool routing + anti-hallucination + discernment harness
 - [ ] Eval live run (free-tier daily quota)
 - [ ] Deployment (render.com, like agro-iam)
+- [ ] Live agro-iam wiring — UUID tenant ids + role vocabulary alignment
 
 ## License
 

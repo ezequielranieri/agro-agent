@@ -75,7 +75,7 @@ func toolCtx() context.Context {
 
 func TestProgramarAplicacion_ParamsValidos(t *testing.T) {
 	store := newFakeApprovalStore()
-	tool := ProgramarAplicacion(approval.New(store, nil, nil, nil, time.Hour))
+	tool := ProgramarAplicacion(approval.New(store, nil, nil, time.Hour))
 	ctx := toolCtx()
 
 	res, err := runTool(t, tool, ctx, map[string]any{
@@ -112,7 +112,7 @@ func TestProgramarAplicacion_ParamsValidos(t *testing.T) {
 }
 
 func TestProgramarAplicacion_ValidaParams(t *testing.T) {
-	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, nil, time.Hour))
+	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, time.Hour))
 	ctx := toolCtx()
 
 	base := map[string]any{
@@ -150,7 +150,7 @@ func TestProgramarAplicacion_ValidaParams(t *testing.T) {
 
 func TestProgramarAplicacion_RechazaEspacioEnCampoNoString(t *testing.T) {
 	// Sanidad: el decode tipado rechaza tipos que no matchean (dosis como string).
-	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, nil, time.Hour))
+	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, time.Hour))
 	if _, err := runTool(t, tool, toolCtx(), map[string]any{
 		"lote_codigo": "12", "producto": "Glifosato 48%", "campana": "2026/2027",
 		"dosis": "tres", "fecha_planificada": "2026-08-20",
@@ -160,7 +160,7 @@ func TestProgramarAplicacion_RechazaEspacioEnCampoNoString(t *testing.T) {
 }
 
 func TestProgramarAplicacion_SinTenantFalla(t *testing.T) {
-	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, nil, time.Hour))
+	tool := ProgramarAplicacion(approval.New(newFakeApprovalStore(), nil, nil, time.Hour))
 	_, err := runTool(t, tool, context.Background(), map[string]any{
 		"lote_codigo": "12", "producto": "Glifosato 48%", "campana": "2026/2027",
 		"dosis": 3.0, "fecha_planificada": "2026-08-20",

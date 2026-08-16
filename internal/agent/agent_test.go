@@ -226,8 +226,54 @@ func (f *fakeAplicacionStore) ListAplicaciones(_ context.Context, tid domain.Ten
 	return out, nil
 }
 
-// dummyTool arma una tool inerte con dominio para testear el filtrado del
-// router sin tocar la DB ni el LLM real.
+// blockingProvider se cuelga hasta que el contexto muere: simula un LLM que
+// no responde. Devuelve el error del ctx (deadline/cancelación), igual que el
+// SDK de Gemini ante un timeout.
+type blockingProvider struct{}
+
+func (blockingProvider) Chat(ctx context.Context, _ []llm.Message, _ []llm.ToolSchema) (llm.Response, error) {
+	<-ctx.Done()
+	return llm.Response{}, ctx.Err()
+}
+
+// TestRun_IteracionColgadaNoPinaLaGoroutine: el deadline POR ITERACIÓN debe
+// cortar a un provider que se cuelga; sin él, la goroutine quedaría pinzada
+// para siempre y el request jamás terminaría.
+func TestRun_IteracionColgadaNoPinaLaGoroutine(t *testing.T) {
+	a := New(blockingProvider{}, tools.NewRegistry(), Options{ChatTimeout: 100 * time.Millisecond})
+	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
+
+	start := time.Now()
+	_, err := a.Run(ctx, nil, "colgá")
+	if err == nil {
+		t.Fatal("esperaba error por deadline de la iteración")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("el deadline no cortó la llamada colgada: tardó %v", elapsed)
+	}
+}
+
+// TestRun_CtxCanceladoEntreIteracionesCortaElLoop: si el request murió (por
+// ejemplo, el cliente cerró el SSE), el loop no sigue gastando llamadas al LLM.
+// El fake devuelve la primera respuesta igual (no lee el ctx), pero el chequeo
+// entre iteraciones corta antes de la segunda llamada.
+func TestRun_CtxCanceladoEntreIteracionesCortaElLoop(t *testing.T) {
+	provider := &fakeProvider{responses: []llm.Response{
+		callTool("detectar_retrasos", map[string]any{}),
+		callTool("detectar_retrasos", map[string]any{}),
+		{Text: "nunca debió llegar acá"},
+	}}
+	a := New(provider, testRegistry(), Options{MaxIterations: 5})
+	ctx, cancel := context.WithCancel(tenant.WithID(context.Background(), domain.TenantID(1)))
+	cancel()
+
+	if _, err := a.Run(ctx, nil, "cortá"); err == nil {
+		t.Fatal("esperaba error por contexto cancelado")
+	}
+	if provider.callIndex != 1 {
+		t.Errorf("el loop debía cortar tras la primera llamada, se llamó %d veces", provider.callIndex)
+	}
+}
 func dummyTool(name string, dominio tools.Dominio) tools.Tool {
 	return tools.Tool{
 		Name:        name,

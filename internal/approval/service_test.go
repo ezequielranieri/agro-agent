@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,11 +18,15 @@ import (
 )
 
 // -----------------------------------------------------------------------------
-// Fakes de los puertos (Store/Resolver/Writer/Auditor) + reloj fijo.
+// Fakes de los puertos (Store/Applier/Auditor) + reloj fijo.
 // Los tests del caso de uso NO dependen de Postgres.
 // -----------------------------------------------------------------------------
 
+// fakeStore es thread-safe: el test de carrera dispara approves concurrentes
+// que leen (GetByTenant) y escriben (Decide) sobre el mismo mapa. Decide
+// replica la guarda condicional de la DB: solo una fila 'pendiente' cambia.
 type fakeStore struct {
+	mu               sync.Mutex
 	byID             map[int64]Request
 	nextID           int64
 	markedExpiredTID domain.TenantID
@@ -36,6 +42,8 @@ func newFakeStore() *fakeStore {
 }
 
 func (f *fakeStore) Create(_ context.Context, tid domain.TenantID, actorID int64, action string, payload json.RawMessage, tokenHash string, expiresAt time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	id := f.nextID
 	f.nextID++
 	f.byID[id] = Request{
@@ -47,6 +55,8 @@ func (f *fakeStore) Create(_ context.Context, tid domain.TenantID, actorID int64
 }
 
 func (f *fakeStore) GetByTenant(_ context.Context, tid domain.TenantID, id int64) (*Request, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	r, ok := f.byID[id]
 	if !ok || r.TenantID != tid {
 		return nil, ErrNotFound
@@ -55,6 +65,8 @@ func (f *fakeStore) GetByTenant(_ context.Context, tid domain.TenantID, id int64
 }
 
 func (f *fakeStore) ListByTenant(_ context.Context, tid domain.TenantID, status string) ([]Request, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []Request
 	for _, r := range f.byID {
 		if r.TenantID != tid {
@@ -69,14 +81,24 @@ func (f *fakeStore) ListByTenant(_ context.Context, tid domain.TenantID, status 
 }
 
 func (f *fakeStore) MarkExpired(_ context.Context, tid domain.TenantID) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.markedExpiredTID = tid
 	return 0, nil
 }
 
+// Decide replica la transición condicional de la DB: solo una fila pendiente
+// puede cambiar de estado. Un decide sobre una solicitud ya decidida falla
+// con ErrNotPending (lo que el transporte mapea a 409).
 func (f *fakeStore) Decide(_ context.Context, tid domain.TenantID, id, decidedBy int64, status Status) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	r, ok := f.byID[id]
 	if !ok || r.TenantID != tid {
 		return ErrNotFound
+	}
+	if r.Status != StatusPending {
+		return ErrNotPending
 	}
 	r.Status = status
 	r.DecidedBy = &decidedBy
@@ -91,47 +113,87 @@ func (f *fakeStore) Decide(_ context.Context, tid domain.TenantID, id, decidedBy
 	return nil
 }
 
-type fakeResolver struct {
+// applyCall registra una materialización: la resolución y la aplicación
+// creada, para que los tests verifiquen la re-validación del contexto.
+type applyCall struct {
+	id         int64
+	decidedBy  int64
+	loteID     int64
+	productoID int64
+	campanaID  int64
+	payload    AplicacionPayload
+}
+
+// fakeApplier modela la transacción del adaptador pg: re-valida el contexto,
+// aplica la guarda condicional (solo una solicitud pendiente gana) e inserta
+// la aplicación. El mutex lo comparte con el fakeStore, así la secuencia
+// GetByTenant→Apply del service se serializa igual que el bloqueo de fila del
+// UPDATE en Postgres.
+type fakeApplier struct {
+	store     *fakeStore
 	lotes     map[string]int64
 	productos map[string]int64
 	campanas  map[string]int64
+	app       domain.Aplicacion
+	calls     []applyCall
+	created   []domain.Aplicacion
 }
 
-func (r *fakeResolver) ResolveLoteID(_ context.Context, _ domain.TenantID, codigo string) (int64, error) {
-	id, ok := r.lotes[codigo]
+func newFakeApplier(store *fakeStore) *fakeApplier {
+	return &fakeApplier{
+		store:     store,
+		lotes:     map[string]int64{},
+		productos: map[string]int64{},
+		campanas:  map[string]int64{},
+	}
+}
+
+func (a *fakeApplier) Apply(_ context.Context, tid domain.TenantID, id, decidedBy int64, p AplicacionPayload) (domain.Aplicacion, error) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+
+	// Guarda de carrera idéntica a la DB: la solicitud debe seguir pendiente.
+	r, ok := a.store.byID[id]
+	if !ok || r.TenantID != tid {
+		return domain.Aplicacion{}, ErrNotFound
+	}
+	if r.Status != StatusPending {
+		return domain.Aplicacion{}, ErrNotPending
+	}
+
+	// Re-validación del contexto (resuelve acotado al tenant).
+	loteID, ok := a.lotes[p.LoteCodigo]
 	if !ok {
-		return 0, ErrNotFound
+		return domain.Aplicacion{}, fmt.Errorf("re-validación: el lote %q no existe o no pertenece al tenant", p.LoteCodigo)
 	}
-	return id, nil
-}
-
-func (r *fakeResolver) ResolveProductoID(_ context.Context, _ domain.TenantID, nombre string) (int64, error) {
-	id, ok := r.productos[nombre]
+	productoID, ok := a.productos[p.Producto]
 	if !ok {
-		return 0, ErrNotFound
+		return domain.Aplicacion{}, fmt.Errorf("re-validación: el producto %q no existe o no pertenece al tenant", p.Producto)
 	}
-	return id, nil
-}
-
-func (r *fakeResolver) ResolveCampanaID(_ context.Context, _ domain.TenantID, nombre string) (int64, error) {
-	id, ok := r.campanas[nombre]
+	campanaID, ok := a.campanas[p.Campana]
 	if !ok {
-		return 0, ErrNotFound
+		return domain.Aplicacion{}, fmt.Errorf("re-validación: la campaña %q no existe o no pertenece al tenant", p.Campana)
 	}
-	return id, nil
-}
 
-type fakeWriter struct {
-	created []AplicacionInput
-	app     domain.Aplicacion
-}
-
-func (w *fakeWriter) CreateAplicacion(_ context.Context, _ domain.TenantID, _ int64, in AplicacionInput) (domain.Aplicacion, error) {
-	w.created = append(w.created, in)
-	if w.app.ID == 0 {
-		w.app.ID = 999
+	// El INSERT solo ocurre si la guarda pasó: el perdedor de la carrera no
+	// crea ninguna fila de aplicación.
+	app := a.app
+	if app.ID == 0 {
+		app.ID = 999
 	}
-	return w.app, nil
+	app.LoteID = loteID
+	app.CampanaID = campanaID
+	a.calls = append(a.calls, applyCall{id: id, decidedBy: decidedBy, loteID: loteID, productoID: productoID, campanaID: campanaID, payload: p})
+	a.created = append(a.created, app)
+
+	// Marca la solicitud como ejecutada (igual que el UPDATE del pg adapter).
+	r.Status = StatusExecuted
+	r.DecidedBy = &decidedBy
+	now := time.Now()
+	r.DecidedAt = &now
+	a.store.byID[id] = r
+
+	return app, nil
 }
 
 type fakeAuditor struct {
@@ -185,10 +247,20 @@ func ctxActor(tid domain.TenantID, userID, role string) context.Context {
 }
 
 // fixedClock devuelve el service con un reloj fijo (para vencimientos) y ttl fijo.
-func newService(store Store, resolver Resolver, writer ApplicationWriter, auditor Auditor, now time.Time) *Service {
-	svc := New(store, resolver, writer, auditor, time.Hour)
+func newService(store Store, applier Applier, auditor Auditor, now time.Time) *Service {
+	svc := New(store, applier, auditor, time.Hour)
 	svc.now = func() time.Time { return now }
 	return svc
+}
+
+// resolvedApplier devuelve un applier listo para el approve feliz: resuelve el
+// lote/producto/campaña del payload de seedPending.
+func resolvedApplier(store *fakeStore) *fakeApplier {
+	a := newFakeApplier(store)
+	a.lotes["12"] = 1
+	a.productos["Glifosato 48%"] = 1
+	a.campanas["2026/2027"] = 3
+	return a
 }
 
 // -----------------------------------------------------------------------------
@@ -197,7 +269,7 @@ func newService(store Store, resolver Resolver, writer ApplicationWriter, audito
 
 func TestCreateRequest_GeneraTokenYHash(t *testing.T) {
 	store := newFakeStore()
-	svc := newService(store, nil, nil, nil, time.Now())
+	svc := newService(store, nil, nil, time.Now())
 
 	req, err := svc.CreateRequest(ctxActor(1, "42", "productor"), "programar_aplicacion", mustPayload(t, AplicacionPayload{LoteCodigo: "12"}))
 	if err != nil {
@@ -228,7 +300,7 @@ func TestCreateRequest_GeneraTokenYHash(t *testing.T) {
 
 func TestCreateRequest_LeeTenantDelContexto(t *testing.T) {
 	store := newFakeStore()
-	svc := newService(store, nil, nil, nil, time.Now())
+	svc := newService(store, nil, nil, time.Now())
 
 	if _, err := svc.CreateRequest(ctxActor(2, "42", "productor"), "programar_aplicacion", mustPayload(t, AplicacionPayload{LoteCodigo: "12"})); err != nil {
 		t.Fatalf("CreateRequest: %v", err)
@@ -241,7 +313,7 @@ func TestCreateRequest_LeeTenantDelContexto(t *testing.T) {
 }
 
 func TestCreateRequest_SinActorFalla(t *testing.T) {
-	svc := newService(newFakeStore(), nil, nil, nil, time.Now())
+	svc := newService(newFakeStore(), nil, nil, time.Now())
 	// Contexto con tenant pero SIN identity: fail-closed, la solicitud no
 	// puede quedar huérfana de autor.
 	ctx := tenant.WithID(context.Background(), domain.TenantID(1))
@@ -256,10 +328,10 @@ func TestCreateRequest_SinActorFalla(t *testing.T) {
 
 func TestApprove_Feliz(t *testing.T) {
 	store := newFakeStore()
-	resolver := &fakeResolver{lotes: map[string]int64{"12": 1}, productos: map[string]int64{"Glifosato 48%": 1}, campanas: map[string]int64{"2026/2027": 3}}
-	writer := &fakeWriter{app: domain.Aplicacion{ID: 42}}
+	applier := resolvedApplier(store)
+	applier.app = domain.Aplicacion{ID: 42}
 	auditor := &fakeAuditor{}
-	svc := newService(store, resolver, writer, auditor, time.Now())
+	svc := newService(store, applier, auditor, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	app, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto")
@@ -269,20 +341,21 @@ func TestApprove_Feliz(t *testing.T) {
 	if app.ID != 42 {
 		t.Errorf("no devolvió la aplicación creada: %+v", app)
 	}
-	// Writer llamado con los IDs RESUELTOS (re-validación del contexto).
-	if len(writer.created) != 1 {
-		t.Fatalf("writer no llamado: %d", len(writer.created))
+	// Applier llamado con los IDs RESUELTOS (re-validación del contexto).
+	if len(applier.calls) != 1 {
+		t.Fatalf("applier no llamado: %d", len(applier.calls))
 	}
-	in := writer.created[0]
-	if in.LoteID != 1 || in.ProductoID != 1 || in.CampanaID != 3 {
-		t.Errorf("IDs no resueltos: %+v", in)
+	call := applier.calls[0]
+	if call.loteID != 1 || call.productoID != 1 || call.campanaID != 3 {
+		t.Errorf("IDs no resueltos: %+v", call)
 	}
-	if in.Dosis != 3.0 || in.FechaPlanificada != "2026-08-20" || in.UnidadDosis != "L/ha" {
-		t.Errorf("payload no revalidado: %+v", in)
+	if call.payload.Dosis != 3.0 || call.payload.FechaPlanificada != "2026-08-20" || call.payload.UnidadDosis != "L/ha" {
+		t.Errorf("payload no revalidado: %+v", call.payload)
 	}
-	// Decide llamado con estado ejecutado (aprobación == ejecución en este slice).
-	if len(store.decisions) != 1 || store.decisions[0].status != StatusExecuted {
-		t.Errorf("Decide no llamado con ejecutado: %+v", store.decisions)
+	// La solicitud quedó ejecutada (aprobación == ejecución en este slice).
+	persisted := store.byID[id]
+	if persisted.Status != StatusExecuted {
+		t.Errorf("la solicitud no quedó ejecutada: %s", persisted.Status)
 	}
 	if auditor.records != 1 {
 		t.Errorf("auditor no llamado: %d", auditor.records)
@@ -291,15 +364,15 @@ func TestApprove_Feliz(t *testing.T) {
 
 func TestApprove_TokenIncorrecto(t *testing.T) {
 	store := newFakeStore()
-	writer := &fakeWriter{}
-	svc := newService(store, &fakeResolver{}, writer, &fakeAuditor{}, time.Now())
+	applier := newFakeApplier(store)
+	svc := newService(store, applier, &fakeAuditor{}, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	if _, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "token-mal"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("esperaba ErrInvalidToken, obtuve %v", err)
 	}
-	if len(writer.created) != 0 {
-		t.Error("con token inválido NO se debe llamar al writer")
+	if len(applier.created) != 0 {
+		t.Error("con token inválido NO se debe llamar al applier")
 	}
 }
 
@@ -312,7 +385,7 @@ func TestApprove_Vencida(t *testing.T) {
 		Dosis: 3.0, FechaPlanificada: "2026-08-20",
 	})
 	id, _ := store.Create(context.Background(), 1, 1, "programar_aplicacion", payload, hashToken("tokensecreto"), now.Add(-time.Minute))
-	svc := newService(store, &fakeResolver{}, &fakeWriter{}, &fakeAuditor{}, now)
+	svc := newService(store, newFakeApplier(store), &fakeAuditor{}, now)
 
 	if _, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto"); !errors.Is(err, ErrExpired) {
 		t.Fatalf("esperaba ErrExpired, obtuve %v", err)
@@ -321,9 +394,10 @@ func TestApprove_Vencida(t *testing.T) {
 
 func TestApprove_NoPendiente(t *testing.T) {
 	store := newFakeStore()
-	// La primera aprobación debe llegar hasta Decide: el resolver resuelve todo.
-	resolver := &fakeResolver{lotes: map[string]int64{"12": 1}, productos: map[string]int64{"Glifosato 48%": 1}, campanas: map[string]int64{"2026/2027": 3}}
-	svc := newService(store, resolver, &fakeWriter{app: domain.Aplicacion{ID: 42}}, &fakeAuditor{}, time.Now())
+	// La primera aprobación debe llegar hasta el applier: el resolver resuelve todo.
+	applier := resolvedApplier(store)
+	applier.app = domain.Aplicacion{ID: 42}
+	svc := newService(store, applier, &fakeAuditor{}, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	// La ejecuta una vez (queda 'ejecutado'); la segunda aprobación es ErrNotPending.
@@ -333,13 +407,16 @@ func TestApprove_NoPendiente(t *testing.T) {
 	if _, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto"); !errors.Is(err, ErrNotPending) {
 		t.Fatalf("esperaba ErrNotPending, obtuve %v", err)
 	}
+	if len(applier.created) != 1 {
+		t.Errorf("solo la primera aprobación crea aplicación: %d", len(applier.created))
+	}
 }
 
 func TestApprove_LoteNoResuelve(t *testing.T) {
 	store := newFakeStore()
-	// Resolver SIN el lote "12" del payload: la re-validación debe fallar.
-	writer := &fakeWriter{}
-	svc := newService(store, &fakeResolver{}, writer, &fakeAuditor{}, time.Now())
+	// Applier SIN el lote "12" del payload: la re-validación debe fallar.
+	applier := newFakeApplier(store)
+	svc := newService(store, applier, &fakeAuditor{}, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	_, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto")
@@ -349,8 +426,8 @@ func TestApprove_LoteNoResuelve(t *testing.T) {
 	if !strings.Contains(err.Error(), "no existe o no pertenece al tenant") {
 		t.Errorf("error sin explicar la causa: %v", err)
 	}
-	if len(writer.created) != 0 {
-		t.Error("si el lote no resuelve, NO se llama al writer")
+	if len(applier.created) != 0 {
+		t.Error("si el lote no resuelve, NO se llama al INSERT")
 	}
 }
 
@@ -360,7 +437,7 @@ func TestApprove_PayloadManipulado(t *testing.T) {
 	// la DB; la re-validación fail-closed lo rechaza.
 	manipulado := json.RawMessage(`{"lote_codigo":"12","producto":"Glifosato 48%","campana":"2026/2027","dosis":3,"fecha_planificada":"2026-08-20","tenant_id":2}`)
 	id, _ := store.Create(context.Background(), 1, 1, "programar_aplicacion", manipulado, hashToken("tokensecreto"), time.Now().Add(time.Hour))
-	svc := newService(store, &fakeResolver{}, &fakeWriter{}, &fakeAuditor{}, time.Now())
+	svc := newService(store, newFakeApplier(store), &fakeAuditor{}, time.Now())
 
 	if _, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto"); err == nil {
 		t.Fatal("esperaba error por payload con campo desconocido")
@@ -369,11 +446,11 @@ func TestApprove_PayloadManipulado(t *testing.T) {
 
 func TestApprove_AuditorFailOpen(t *testing.T) {
 	store := newFakeStore()
-	resolver := &fakeResolver{lotes: map[string]int64{"12": 1}, productos: map[string]int64{"Glifosato 48%": 1}, campanas: map[string]int64{"2026/2027": 3}}
-	writer := &fakeWriter{app: domain.Aplicacion{ID: 42}}
+	applier := resolvedApplier(store)
+	applier.app = domain.Aplicacion{ID: 42}
 	// La auditoría FALLA: el approve debe seguir exitoso (fail-open).
 	auditor := &fakeAuditor{err: errors.New("audit db caída")}
-	svc := newService(store, resolver, writer, auditor, time.Now())
+	svc := newService(store, applier, auditor, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	if _, err := svc.Approve(ctxActor(1, "2", "agronomo"), id, "tokensecreto"); err != nil {
@@ -384,6 +461,53 @@ func TestApprove_AuditorFailOpen(t *testing.T) {
 	}
 }
 
+// TestConcurrentApprove_SoloUnaGana es la prueba del TOCTOU: dos approves
+// concurrentes con el MISMO token válido sobre la MISMA solicitud pendiente.
+// Exactamente uno gana (crea la aplicación) y el otro recibe ErrNotPending;
+// al final existe exactamente UNA fila de aplicación.
+func TestConcurrentApprove_SoloUnaGana(t *testing.T) {
+	store := newFakeStore()
+	applier := resolvedApplier(store)
+	applier.app = domain.Aplicacion{ID: 42}
+	svc := newService(store, applier, &fakeAuditor{}, time.Now())
+	id := seedPending(t, store, 1, "tokensecreto")
+
+	ctx := ctxActor(1, "2", "agronomo")
+	const n = 2
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	apps := make([]domain.Aplicacion, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			apps[i], errs[i] = svc.Approve(ctx, id, "tokensecreto")
+		}(i)
+	}
+	wg.Wait()
+
+	exitos := 0
+	for i, err := range errs {
+		if err == nil {
+			exitos++
+			if apps[i].ID != 42 {
+				t.Errorf("aplicación inesperada: %+v", apps[i])
+			}
+			continue
+		}
+		// El perdedor debe recibir el error "no aprobable" (409 en HTTP).
+		if !errors.Is(err, ErrNotPending) {
+			t.Errorf("el perdedor debe recibir ErrNotPending, obtuvo: %v", err)
+		}
+	}
+	if exitos != 1 {
+		t.Fatalf("exactamente UNA aprobación debe ganar, ganaron %d", exitos)
+	}
+	if len(applier.created) != 1 {
+		t.Fatalf("exactamente UNA fila de aplicación debe existir, hay %d", len(applier.created))
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Reject y List
 // -----------------------------------------------------------------------------
@@ -391,7 +515,7 @@ func TestApprove_AuditorFailOpen(t *testing.T) {
 func TestReject_Feliz(t *testing.T) {
 	store := newFakeStore()
 	auditor := &fakeAuditor{}
-	svc := newService(store, nil, nil, auditor, time.Now())
+	svc := newService(store, nil, auditor, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	if err := svc.Reject(ctxActor(1, "2", "agronomo"), id, "tokensecreto"); err != nil {
@@ -407,7 +531,7 @@ func TestReject_Feliz(t *testing.T) {
 
 func TestReject_TokenIncorrecto(t *testing.T) {
 	store := newFakeStore()
-	svc := newService(store, nil, nil, &fakeAuditor{}, time.Now())
+	svc := newService(store, nil, &fakeAuditor{}, time.Now())
 
 	id := seedPending(t, store, 1, "tokensecreto")
 	if err := svc.Reject(ctxActor(1, "2", "agronomo"), id, "mal"); !errors.Is(err, ErrInvalidToken) {
@@ -420,7 +544,7 @@ func TestReject_TokenIncorrecto(t *testing.T) {
 
 func TestList_MarcaVencidas(t *testing.T) {
 	store := newFakeStore()
-	svc := newService(store, nil, nil, nil, time.Now())
+	svc := newService(store, nil, nil, time.Now())
 
 	if _, err := svc.List(ctxActor(1, "42", "productor"), ""); err != nil {
 		t.Fatalf("List: %v", err)
@@ -432,7 +556,7 @@ func TestList_MarcaVencidas(t *testing.T) {
 
 func TestList_FiltraPorEstado(t *testing.T) {
 	store := newFakeStore()
-	svc := newService(store, nil, nil, nil, time.Now())
+	svc := newService(store, nil, nil, time.Now())
 
 	seedPending(t, store, 1, "tokensecreto")
 	reqs, err := svc.List(ctxActor(1, "42", "productor"), "pendiente")

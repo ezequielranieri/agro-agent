@@ -22,8 +22,9 @@ import (
 
 // Options configura el orquestador.
 type Options struct {
-	MaxIterations int         // default 5
-	OnEvent       func(Event) // nil-safe: si es nil, no se notifica nada
+	MaxIterations int           // default 5
+	ChatTimeout   time.Duration // tope por llamada al LLM; <= 0 usa 60s
+	OnEvent       func(Event)   // nil-safe: si es nil, no se notifica nada
 	// Router clasifica la consulta por dominio (datos/documentos) para
 	// exponer al LLM solo las tools relevantes. Nil = comportamiento clásico:
 	// todas las tools, el modelo decide solo por descripción.
@@ -45,6 +46,7 @@ type Agent struct {
 	registry      *tools.Registry
 	router        router.Clasificador
 	maxIterations int
+	chatTimeout   time.Duration
 	onEvent       func(Event)
 }
 
@@ -52,7 +54,14 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 	if opts.MaxIterations <= 0 {
 		opts.MaxIterations = 5
 	}
-	return &Agent{provider: provider, registry: registry, router: opts.Router, maxIterations: opts.MaxIterations, onEvent: opts.OnEvent}
+	// defaultChatTimeout acota cada llamada al LLM: un provider colgado no
+	// puede pinchar la goroutine del request para siempre (el SSE moriría sin
+	// el evento done).
+	const defaultChatTimeout = 60 * time.Second
+	if opts.ChatTimeout <= 0 {
+		opts.ChatTimeout = defaultChatTimeout
+	}
+	return &Agent{provider: provider, registry: registry, router: opts.Router, maxIterations: opts.MaxIterations, chatTimeout: opts.ChatTimeout, onEvent: opts.OnEvent}
 }
 
 // onEventCb emite un evento si hay callback configurado. Separado en un método
@@ -143,9 +152,20 @@ func (a *Agent) Run(ctx context.Context, history []llm.Message, userText string)
 	var total llm.Usage
 
 	for i := 0; i < a.maxIterations; i++ {
-		resp, err := a.provider.Chat(ctx, messages, toLLMTools(defs))
+		// Deadline POR ITERACIÓN: el timeout deriva del ctx del request, así
+		// que la cancelación del cliente (SSE cerrado, shutdown) corta antes
+		// del tope. Sin esto, un provider colgado pincha la goroutine y el
+		// request nunca termina.
+		iterCtx, cancel := context.WithTimeout(ctx, a.chatTimeout)
+		resp, err := a.provider.Chat(iterCtx, messages, toLLMTools(defs))
+		cancel()
 		if err != nil {
 			return Answer{}, fmt.Errorf("agent: llamada al LLM (iteración %d): %w", i+1, err)
+		}
+		// El request murió mientras el LLM respondía: no seguimos gastando
+		// llamadas al modelo (costo + latencia) para nadie que ya no escucha.
+		if ctx.Err() != nil {
+			return Answer{}, fmt.Errorf("agent: contexto cancelado (iteración %d): %w", i+1, ctx.Err())
 		}
 		total = total.Add(resp.Usage)
 

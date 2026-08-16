@@ -24,24 +24,23 @@ import (
 const defaultTTL = 24 * time.Hour
 
 // Service es el caso de uso del HITL. Depende solo de puertos (Store,
-// Resolver, ApplicationWriter, Auditor): no conoce Postgres ni HTTP.
+// Applier, Auditor): no conoce Postgres ni HTTP.
 type Service struct {
-	store    Store
-	resolver Resolver
-	writer   ApplicationWriter
-	auditor  Auditor
-	ttl      time.Duration
-	now      func() time.Time // reloj inyectable: los tests fijan fechas
+	store   Store
+	applier Applier
+	auditor Auditor
+	ttl     time.Duration
+	now     func() time.Time // reloj inyectable: los tests fijan fechas
 }
 
 // New arma el service. ttl <= 0 cae al default (24h); el reloj por defecto es
 // time.Now, los tests inyectan uno fijo.
-func New(store Store, resolver Resolver, writer ApplicationWriter, auditor Auditor, ttl time.Duration) *Service {
+func New(store Store, applier Applier, auditor Auditor, ttl time.Duration) *Service {
 	if ttl <= 0 {
 		ttl = defaultTTL
 	}
 	now := time.Now
-	return &Service{store: store, resolver: resolver, writer: writer, auditor: auditor, ttl: ttl, now: now}
+	return &Service{store: store, applier: applier, auditor: auditor, ttl: ttl, now: now}
 }
 
 // newToken genera el token opaco de aprobación: 32 bytes aleatorios en hex
@@ -124,6 +123,7 @@ func (s *Service) CreateRequest(ctx context.Context, action string, payload json
 		CreatedAt:   s.now(),
 	}, nil
 }
+
 // Primero marca vencidas: una solicitud cuyo expires_at pasó NO debe seguir
 // apareciendo como pendiente.
 func (s *Service) List(ctx context.Context, status string) ([]Request, error) {
@@ -143,9 +143,10 @@ func (s *Service) List(ctx context.Context, status string) ([]Request, error) {
 
 // Approve aprueba y EJECUTA la solicitud en el mismo flujo. El orden es
 // deliberado: primero se valida el estado (pendiente y vigente), después el
-// token, y recién entonces se RE-VALIDA el contexto del payload original para
-// resolver lote/producto/campaña DENTRO del tenant. Una solicitud manipulada
-// o de otra cooperativa falla acá, no en el INSERT.
+// token, y recién entonces se materializa la aplicación. La re-validación del
+// contexto (lote/producto/campaña), la decisión condicional y el INSERT corren
+// en UNA transacción (Applier): una solicitud manipulada o de otra cooperativa
+// falla acá, y dos approves concurrentes con el mismo token no duplican filas.
 func (s *Service) Approve(ctx context.Context, id int64, token string) (domain.Aplicacion, error) {
 	tid, err := tenant.FromContext(ctx)
 	if err != nil {
@@ -182,38 +183,13 @@ func (s *Service) Approve(ctx context.Context, id int64, token string) (domain.A
 		return domain.Aplicacion{}, fmt.Errorf("approval: re-validación: %w", err)
 	}
 
-	loteID, err := s.resolver.ResolveLoteID(ctx, tid, payload.LoteCodigo)
+	// MATERIALIZACIÓN ATÓMICA: la re-validación, la decisión condicional
+	// (WHERE status='pendiente') y el INSERT corren en UNA transacción. Si
+	// otra aprobación con el mismo token ganó antes, esta recibe ErrNotPending
+	// (409) y su transacción no inserta nada: imposible duplicar la aplicación.
+	app, err := s.applier.Apply(ctx, tid, id, deciderInt, payload)
 	if err != nil {
-		return domain.Aplicacion{}, fmt.Errorf("re-validación: el lote %q no existe o no pertenece al tenant", payload.LoteCodigo)
-	}
-	productoID, err := s.resolver.ResolveProductoID(ctx, tid, payload.Producto)
-	if err != nil {
-		return domain.Aplicacion{}, fmt.Errorf("re-validación: el producto %q no existe o no pertenece al tenant", payload.Producto)
-	}
-	campanaID, err := s.resolver.ResolveCampanaID(ctx, tid, payload.Campana)
-	if err != nil {
-		return domain.Aplicacion{}, fmt.Errorf("re-validación: la campaña %q no existe o no pertenece al tenant", payload.Campana)
-	}
-
-	app, err := s.writer.CreateAplicacion(ctx, tid, deciderInt, AplicacionInput{
-		LoteID:           loteID,
-		CampanaID:        campanaID,
-		ProductoID:       productoID,
-		Dosis:            payload.Dosis,
-		UnidadDosis:      payload.UnidadDosis,
-		FechaPlanificada: payload.FechaPlanificada,
-		Notas:            payload.Notas,
-	})
-	if err != nil {
-		return domain.Aplicacion{}, fmt.Errorf("approval: crear aplicación: %w", err)
-	}
-
-	// DECISIÓN DE DISEÑO: la aprobación ejecuta en el MISMO flujo, por eso el
-	// estado final es 'ejecutado' (no 'aprobado'). El estado 'aprobado' queda
-	// reservado a un futuro worker que ejecute en diferido; hoy aprobar ==
-	// ejecutar, y el registro debe reflejarlo.
-	if err := s.store.Decide(ctx, tid, id, deciderInt, StatusExecuted); err != nil {
-		return domain.Aplicacion{}, fmt.Errorf("approval: marcar ejecutado: %w", err)
+		return domain.Aplicacion{}, fmt.Errorf("approval: aprobar: %w", err)
 	}
 
 	// La auditoría es fail-open: la aplicación ya se creó y decidió; un fallo

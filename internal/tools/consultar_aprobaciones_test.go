@@ -22,7 +22,7 @@ func TestConsultarAprobaciones_SinFiltroYConFiltro(t *testing.T) {
 	rejected.Status = approval.StatusRejected
 	store.byID[2] = rejected
 
-	svc := approval.New(store, nil, nil, nil, time.Hour)
+	svc := approval.New(store, nil, nil, time.Hour)
 	tool := ConsultarAprobaciones(svc)
 
 	// Sin filtro: las dos.
@@ -46,7 +46,7 @@ func TestConsultarAprobaciones_SinFiltroYConFiltro(t *testing.T) {
 }
 
 func TestConsultarAprobaciones_EstadoInvalido(t *testing.T) {
-	tool := ConsultarAprobaciones(approval.New(newFakeApprovalStore(), nil, nil, nil, time.Hour))
+	tool := ConsultarAprobaciones(approval.New(newFakeApprovalStore(), nil, nil, time.Hour))
 	if _, err := runTool(t, tool, toolCtx(), map[string]any{"estado": "borrada"}); err == nil {
 		t.Fatal("esperaba error para estado fuera del enum")
 	}
@@ -63,7 +63,7 @@ func TestConsultarAprobaciones_NoFiltraToken(t *testing.T) {
 	store.Create(nil, domain.TenantID(1), 1, "programar_aplicacion",
 		json.RawMessage(`{"lote_codigo":"12"}`), "hash-secreto-de-test", time.Now())
 
-	tool := ConsultarAprobaciones(approval.New(store, nil, nil, nil, time.Hour))
+	tool := ConsultarAprobaciones(approval.New(store, nil, nil, time.Hour))
 	res, err := runTool(t, tool, toolCtx(), map[string]any{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)

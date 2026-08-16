@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -279,5 +280,37 @@ func TestChatHistoryOpcional(t *testing.T) {
 	// El historial + el mensaje = 3 mensajes hacia el provider.
 	if len(fake.messages) != 3 {
 		t.Errorf("historial no reenviado: %d mensajes", len(fake.messages))
+	}
+}
+
+// TestChatRateLimit: el endpoint de chat (que llama a un LLM pago) tiene un
+// token bucket por IP. Con cuota 10/min, el 11º request de la misma IP recibe
+// 429 con el mensaje uniforme — sin romper el contrato JSON/SSE de los otros.
+func TestChatRateLimit(t *testing.T) {
+	// Cuota forzada para no depender del entorno de CI.
+	os.Setenv("CHAT_RATE_LIMIT", "10")
+	t.Cleanup(func() { os.Unsetenv("CHAT_RATE_LIMIT") })
+
+	ag := agent.New(&captureProvider{}, tools.NewRegistry(), agent.Options{})
+	h := newTestServer(ag, "secret")
+	token := signTestToken(t, "secret", "1", "admin")
+	body := `{"message":"hola"}`
+
+	var got429 bool
+	for i := 0; i < 11; i++ {
+		w := doChat(t, h, token, body, "")
+		if w.Code == http.StatusTooManyRequests {
+			got429 = true
+			if !strings.Contains(w.Body.String(), "rate limit exceeded") {
+				t.Errorf("429 sin mensaje uniforme: %s", w.Body.String())
+			}
+			break
+		}
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: status inesperado %d", i+1, w.Code)
+		}
+	}
+	if !got429 {
+		t.Error("el 11º request debía superar el límite (cuota 10/min)")
 	}
 }
