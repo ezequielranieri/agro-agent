@@ -370,10 +370,14 @@ Todo verde hoy: build + vet + 60+ tests.
 - [x] RAG — pgvector, `buscar_documentos`, `cmd/embed`
 - [x] Router de discernimiento — clasificador determinista de dominio + exposición filtrada de tools
 - [x] Evals — golden set, harness de routing + anti-alucinación + discernimiento
-- [ ] Corrida live del eval (cuota diaria free tier)
-- [ ] Deploy (render.com, como agro-iam) — **actualmente no desplegado**: el
-      free tier de Render ya lo usa agro-iam; ver [Deploy](#deploy)
+- [x] Fallback multi-proveedor LLM — Gemini → Groq ante límites de cuota (AD-016)
+- [x] Postgres externo — Neon, sembrado, corre vía Docker Compose (AD-017)
 - [x] Conexión live con agro-iam — ingesta accept-both: tenant UUID vía `tenants.uuid`, normalización de roles en inglés, `sub` UUID vía `users.uuid` acotado al tenant (AD-015)
+- [x] Docs — README bilingüe con capturas reales; decisión de deploy documentada
+- [ ] Corrida live del eval (cuota diaria free tier)
+- [ ] Deploy — decidido **no** hostear en público: el free tier de Render ya lo
+      usa agro-iam y no hay plan pago; el backend corre localmente (Docker
+      Compose + Neon). Ver [Deploy](#deploy)
 
 ## Licencia
 
