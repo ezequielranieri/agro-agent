@@ -11,6 +11,16 @@ behavior in idiomatic Go.
 
 > Documentation: [DECISIONS.md](./DECISIONS.md) — architecture decisions & project constitution
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.jpeg" alt="Dashboard overview" width="720"/>
+  <img src="docs/screenshots/chat.jpeg" alt="Chat with the agent" width="720"/>
+</p>
+
+> Add more captures under `docs/screenshots/` (e.g. `approvals.png`,
+> `rag.png`) and reference them here.
+
 ## The problem
 
 A cooperative's agronomists should be able to ask questions in natural
@@ -256,6 +266,14 @@ embeddings).
 
 ## Deployment
 
+**Status: not currently deployed to a public host.** This portfolio project
+stays on free tiers: the Render free tier is already occupied by
+[agro-iam](https://github.com/ezequielranieri/agro-iam) (one free web service
+and one free Postgres per account, plus the 750 h/month instance cap), and a
+paid plan is out of scope — so the backend runs locally (Docker Compose +
+Neon). The instructions below are the path to follow if you ever deploy it
+(e.g. with a paid Render plan or another container host).
+
 Deploy to [Render](https://render.com) with the included
 [`render.yaml`](./render.yaml) blueprint, and host the Postgres on
 [Neon](https://neon.tech) (free serverless Postgres, `pgvector` included):
@@ -345,7 +363,8 @@ All green today: build + vet + 60+ tests.
 - [x] Discernment router — deterministic domain classifier + filtered tool exposure
 - [x] Evals — golden set, tool routing + anti-hallucination + discernment harness
 - [ ] Eval live run (free-tier daily quota)
-- [ ] Deployment (render.com, like agro-iam)
+- [ ] Deployment (render.com, like agro-iam) — **currently not deployed**:
+      the Render free tier is already used by agro-iam; see [Deployment](#deployment)
 - [x] Live agro-iam wiring — accept-both JWT intake: UUID tenant via `tenants.uuid`, English role normalization, UUID `sub` via `users.uuid` scoped to tenant (AD-015)
 
 ## License

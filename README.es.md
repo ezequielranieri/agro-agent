@@ -12,6 +12,16 @@ Go idiomático.
 
 > Documentación: [DECISIONS.es.md](./DECISIONS.es.md) — decisiones de arquitectura y constitución del proyecto
 
+## Capturas
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.jpeg" alt="Vista general del dashboard" width="720"/>
+  <img src="docs/screenshots/chat.jpeg" alt="Chat con el agente" width="720"/>
+</p>
+
+> Agregá más capturas en `docs/screenshots/` (por ejemplo `approvals.png`,
+> `rag.png`) y referencialas acá.
+
 ## El problema
 
 Los agrónomos de una cooperativa deberían poder preguntar en lenguaje natural
@@ -262,6 +272,15 @@ embeddings de Gemini).
 
 ## Deploy
 
+**Estado: actualmente NO está desplegado en un host público.** Este proyecto de
+portfolio se mantiene en tiers gratuitos: el free tier de Render ya está
+ocupado por [agro-iam](https://github.com/ezequielranieri/agro-iam) (un web
+service y una Postgres free por cuenta, más el tope de 750 h/mes de instancia)
+y un plan pago queda fuera de alcance — así que el backend corre localmente
+(Docker Compose + Neon). Las instrucciones de abajo son el camino a seguir si
+alguna vez lo desplegás (por ejemplo con un plan pago de Render u otro host de
+contenedores).
+
 Desplegá en [Render](https://render.com) con el blueprint
 [`render.yaml`](./render.yaml) incluido, y alojá el Postgres en
 [Neon](https://neon.tech) (Postgres serverless free, `pgvector` incluido):
@@ -352,7 +371,8 @@ Todo verde hoy: build + vet + 60+ tests.
 - [x] Router de discernimiento — clasificador determinista de dominio + exposición filtrada de tools
 - [x] Evals — golden set, harness de routing + anti-alucinación + discernimiento
 - [ ] Corrida live del eval (cuota diaria free tier)
-- [ ] Deploy (render.com, como agro-iam)
+- [ ] Deploy (render.com, como agro-iam) — **actualmente no desplegado**: el
+      free tier de Render ya lo usa agro-iam; ver [Deploy](#deploy)
 - [x] Conexión live con agro-iam — ingesta accept-both: tenant UUID vía `tenants.uuid`, normalización de roles en inglés, `sub` UUID vía `users.uuid` acotado al tenant (AD-015)
 
 ## Licencia
