@@ -1,11 +1,15 @@
 // Command api es el backend HTTP de agro-agent: recibe requests autenticados
 // (Bearer JWT emitido por agro-iam), aísla cada uno en su tenant y corre el
-// orquestador sobre Postgres real + Gemini.
+// orquestador sobre Postgres real + un proveedor de LLM (Gemini y/o Groq).
 //
 // Variables de entorno:
 //
 //	AGRO_DATABASE_URL  DSN de Postgres (default local del dev).
-//	GEMINI_API_KEY     clave del proveedor LLM (REQUERIDA).
+//	GEMINI_API_KEY     clave de Gemini (chat + embeddings). OPCIONAL si
+//	                   GROQ_API_KEY está presente (modo solo-Groq).
+//	GROQ_API_KEY       clave de Groq, respaldo del chat ante cuota de Gemini
+//	                   agotada / proveedor caído. OPCIONAL.
+//	GROQ_MODEL         modelo de Groq (default llama-3.3-70b-versatile).
 //	JWT_SECRET         secret compartido con agro-iam (REQUERIDA).
 //	PORT               puerto de escucha (default 8080).
 package main
@@ -41,14 +45,10 @@ func main() {
 	defer stop()
 
 	// --- Configuración ------------------------------------------------------
-	// GEMINI_API_KEY y JWT_SECRET son REQUERIDAS: arrancar sin ellas es
-	// arrancar un servicio que falla en la primera request. Mejor morir claro
-	// en el boot que confundir un 500 en producción.
-	geminiKey := os.Getenv("GEMINI_API_KEY")
-	if geminiKey == "" {
-		log.Error("GEMINI_API_KEY es requerida")
-		os.Exit(1)
-	}
+	// JWT_SECRET es REQUERIDA: arrancar sin ella es arrancar un servicio que
+	// falla en la primera request. Mejor morir claro en el boot que confundir
+	// un 500 en producción. (Las keys de LLM se resuelven más abajo: al menos
+	// GEMINI_API_KEY o GROQ_API_KEY debe estar presente.)
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		log.Error("JWT_SECRET es requerida")
@@ -82,16 +82,59 @@ func main() {
 	defer pool.Close()
 
 	// --- LLM + orquestador --------------------------------------------------
-	gemini, err := llm.NewGemini(ctx, geminiKey, "gemini-3.6-flash")
-	if err != nil {
-		log.Error("crear proveedor Gemini", "err", err)
+	// Compositor de proveedores de chat. GEMINI_API_KEY y GROQ_API_KEY son
+	// OPCIONALES individualmente, pero al menos una es REQUERIDA:
+	//   - ambas    → FallbackProvider(Gemini → Groq): el chat sobrevive a la
+	//                cuota del free tier de Gemini (429) cayendo a Groq.
+	//   - solo Gemini → comportamiento histórico, sin cambios.
+	//   - solo Groq   → Groq como primario (el RAG queda sin embeddings).
+	//   - ninguna     → fatal: arrancar sin LLM es arrancar un servicio roto.
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	groqKey := os.Getenv("GROQ_API_KEY")
+
+	var chatProvider llm.Provider
+	var llmDesc string
+	switch {
+	case geminiKey == "" && groqKey == "":
+		log.Error("se requiere al menos una key de LLM: GEMINI_API_KEY y/o GROQ_API_KEY")
 		os.Exit(1)
+
+	case geminiKey != "" && groqKey != "":
+		gemini, err := llm.NewGemini(ctx, geminiKey, "gemini-3.6-flash")
+		if err != nil {
+			log.Error("crear proveedor Gemini", "err", err)
+			os.Exit(1)
+		}
+		chatProvider = llm.NewFallbackProvider(gemini, llm.NewGroq(groqKey, os.Getenv("GROQ_MODEL")))
+		llmDesc = "gemini (primario) + groq (respaldo)"
+
+	case geminiKey != "":
+		gemini, err := llm.NewGemini(ctx, geminiKey, "gemini-3.6-flash")
+		if err != nil {
+			log.Error("crear proveedor Gemini", "err", err)
+			os.Exit(1)
+		}
+		chatProvider = gemini
+		llmDesc = "gemini"
+
+	default: // solo groqKey
+		chatProvider = llm.NewGroq(groqKey, os.Getenv("GROQ_MODEL"))
+		llmDesc = "groq"
 	}
-	// Embeddings del RAG: mismo proveedor, modelo de vectores propio.
-	geminiEmbed, err := embedding.NewGemini(ctx, geminiKey, "")
-	if err != nil {
-		log.Error("crear proveedor de embeddings", "err", err)
-		os.Exit(1)
+
+	// Embeddings del RAG: dependen de Gemini (Groq no ofrece modelo de
+	// embeddings). En modo solo-Groq se instala un placeholder que devuelve un
+	// error descriptivo: el chat funciona, el RAG de documentos queda
+	// indisponible (sin panics).
+	var geminiEmbed embedding.Embedder
+	if geminiKey != "" {
+		geminiEmbed, err = embedding.NewGemini(ctx, geminiKey, "")
+		if err != nil {
+			log.Error("crear proveedor de embeddings", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		geminiEmbed = embedding.Unavailable{}
 	}
 
 	// --- Registro de tools (mismo wiring que cmd/demo) ----------------------
@@ -126,7 +169,7 @@ func main() {
 		tools.BuscarDocumentos(pg.NewDocumentoStore(pool), geminiEmbed),
 	)
 
-	ag := agent.New(gemini, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
+	ag := agent.New(chatProvider, reg, agent.Options{MaxIterations: 5, Router: router.NewReglasClasificador()})
 
 	// --- HTTP ----------------------------------------------------------------
 	verifier, err := auth.NewVerifier(jwtSecret)
@@ -149,7 +192,7 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Info("agro-agent arrancando", "port", port, "tools", reg.Names())
+	log.Info("agro-agent arrancando", "port", port, "llm", llmDesc, "tools", reg.Names())
 
 	// Servimos en una goroutine: el main se queda esperando la señal de
 	// cierre (SIGINT/SIGTERM) para hacer graceful shutdown.

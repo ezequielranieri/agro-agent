@@ -294,6 +294,39 @@ clave conocida públicamente.
 **Trade-off:** un dev que copie el archivo env al pie de la letra debe elegir
 un secret real — ese es el punto.
 
+## AD-016 · Failover de LLM multi-proveedor (Gemini → Groq)
+
+**Estado:** aceptada · **Alcance:** internal/llm, cmd/api, internal/embedding
+
+**Decisión:** `llm.FallbackProvider` envuelve el puerto `llm.Provider`: intenta
+el primario y, SOLO ante un error transitorio — `429` (cuota/rate limit), `5xx`
+o falla de red, clasificados por `llm.IsTransient` — cae al proveedor
+secundario. Todo lo demás falla cerrado: un error NO transitorio del primario
+se devuelve tal cual, jamás enmascarado. `internal/llm/groq.go` es un segundo
+adapter del puerto `llm.Provider` para la API compatible-OpenAI de Groq
+(`POST /openai/v1/chat/completions`, `Authorization: Bearer`); comparte el
+mismo system prompt y temperatura (0.2) que Gemini, mapea los resultados de
+tools con el mismo envelope `{"result": ...}` y produce
+`ToolCall.ThoughtSignature: nil` (específica de Gemini — segura: el
+orquestador solo la copia). `cmd/api/main.go` compone: ambas keys →
+`FallbackProvider(Gemini → Groq)`; solo `GEMINI_API_KEY` → Gemini solo
+(comportamiento histórico); solo `GROQ_API_KEY` → Groq como único proveedor de
+chat (los embeddings del RAG — solo-Gemini — degradan a un
+`embedding.Unavailable` descriptivo); ninguna → fatal.
+
+**Por qué:** el free tier de Gemini (20 req/día, 5 req/min) vuelve el chat demo
+poco confiable — un día de demos agota la cuota y cada request da 429. El free
+tier de Groq es generoso, así que un failover automático convierte el demo de
+"funciona hasta 20 chats" en una experiencia con sensación de producto, a costo
+cero.
+
+**Trade-off:** dos modelos pueden responder distinto (un eval puede pasar en
+Gemini y fallar en Groq); una conversación mixta que vuelva a Gemini a mitad
+de camino podría dar 400 porque Gemini exige `thought_signature` al reenviar un
+`functionCall` — en la práctica el proveedor agotado sigue fallando, así que la
+conversación completa queda en Groq; una key de entorno más por administrar
+(`GROQ_API_KEY`, opcional).
+
 ## No-decisiones (diferidas explícitamente)
 
 - **Persistencia de conversación** (la tabla messages existe en el schema pero

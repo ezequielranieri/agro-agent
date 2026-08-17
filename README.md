@@ -241,6 +241,19 @@ rate-limited per IP (default 10 req/min, `CHAT_RATE_LIMIT`), but at peak the
 daily quota can still be exhausted — expect `429`/`RESOURCE_EXHAUSTED` errors
 that the provider layer retries once (bounded) before surfacing.
 
+### LLM failover (Gemini → Groq)
+
+Set `GROQ_API_KEY` to make the chat resilient to Gemini free-tier quota
+exhaustion: `cmd/api/main.go` composes a `llm.FallbackProvider` (Gemini
+primary, Groq secondary). On a **transient** error — `429` (quota /
+rate-limit), `5xx`, or a network failure (`llm.IsTransient`) — the request
+falls back to Groq automatically; any other error fails closed (the fallback
+never masks a bug in the primary). Without `GROQ_API_KEY` the system behaves
+exactly as before. `GROQ_MODEL` selects the Groq model (default
+`llama-3.3-70b-versatile`). If only `GROQ_API_KEY` is set, Groq becomes the
+sole chat provider (document RAG stays unavailable — it needs Gemini
+embeddings).
+
 ## Deployment
 
 Deploy to [Render](https://render.com) with the included
@@ -275,7 +288,9 @@ Environment variables used by `cmd/api/main.go`:
 | Variable | Purpose |
 |---|---|
 | `AGRO_DATABASE_URL` | pgx DSN (auto-wired via `fromDatabase`) |
-| `GEMINI_API_KEY` | required at startup |
+| `GEMINI_API_KEY` | chat (primary) + embeddings; required unless `GROQ_API_KEY` is set |
+| `GROQ_API_KEY` | optional — enables automatic failover to Groq on Gemini `429`/`5xx` |
+| `GROQ_MODEL` | optional — Groq model (default `llama-3.3-70b-versatile`) |
 | `JWT_SECRET` | required at startup; the value `change-me` is rejected |
 | `PORT` | injected by Render; code default `8080` |
 | `CHAT_RATE_LIMIT` | optional, per-IP chat rate limit (default 10 req/min) |
@@ -287,7 +302,8 @@ Honest caveats:
   resembling real use.
 - **Gemini free tier is tight for production** (5 req/min, 20/day; the agent
   may call the LLM up to 5 times per request). Expect `429` /
-  `RESOURCE_EXHAUSTED` and the built-in bounded retry.
+  `RESOURCE_EXHAUSTED` and the built-in bounded retry. Setting `GROQ_API_KEY`
+  turns that failure mode into an automatic fallback to Groq.
 - The free Postgres plan is single-node and meant for demos; pick a paid plan
   for durability.
 
@@ -310,7 +326,9 @@ All green today: build + vet + 60+ tests.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AGRO_DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/agro` | pgx DSN |
-| `GEMINI_API_KEY` | — (required) | Gemini API key (chat + embeddings) |
+| `GEMINI_API_KEY` | — (required unless `GROQ_API_KEY` is set) | Gemini API key (chat + embeddings) |
+| `GROQ_API_KEY` | — (optional) | Groq API key — enables automatic failover when Gemini hits quota/provider outage |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model for the failover provider |
 | `GEMINI_EMBED_MODEL` | `gemini-embedding-2` | embeddings model (768 dims via output dimensionality) |
 | `JWT_SECRET` | — (required) | HS256 key for demo JWT (`cmd/mktoken`); the value `change-me` is rejected at startup |
 | `PORT` | `8080` | HTTP bind port |

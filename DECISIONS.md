@@ -280,6 +280,37 @@ publicly-known key.
 **Trade-off:** a dev copying the env file verbatim must pick a real secret —
 that's the point.
 
+## AD-016 · Multi-provider LLM failover (Gemini → Groq)
+
+**Status:** accepted · **Scope:** internal/llm, cmd/api, internal/embedding
+
+**Decision:** `llm.FallbackProvider` wraps the `llm.Provider` port: it tries
+the primary and, ONLY on a transient error — `429` (quota/rate-limit), `5xx`,
+or network failures, classified by `llm.IsTransient` — falls back to a
+secondary provider. Everything else fails closed: a non-transient primary
+error is returned as-is, never masked. `internal/llm/groq.go` is a second
+`llm.Provider` adapter for Groq's OpenAI-compatible API
+(`POST /openai/v1/chat/completions`, `Authorization: Bearer`); it shares the
+same system prompt and temperature (0.2) as Gemini, maps tool results with the
+same `{"result": ...}` envelope, and produces `ToolCall.ThoughtSignature: nil`
+(Gemini-specific — safe: the orchestrator just copies it). `cmd/api/main.go`
+composes: both keys → `FallbackProvider(Gemini → Groq)`; only
+`GEMINI_API_KEY` → Gemini alone (historical behavior); only `GROQ_API_KEY` →
+Groq as the sole chat provider (RAG embeddings — Gemini-only — degrade to a
+descriptive `embedding.Unavailable`); neither → fatal.
+
+**Why:** Gemini's free tier (20 req/day, 5 req/min) makes the demo chat
+unreliable — a day of demos exhausts the quota and every request 429s. Groq's
+free tier is generous, so an automatic failover turns the demo from "works
+until 20 chats" into a product-feeling experience at zero cost.
+
+**Trade-off:** two models can answer differently (an eval run may pass on
+Gemini and fail on Groq); a mixed conversation that returns to Gemini
+mid-flight could 400 because Gemini requires `thought_signature` when
+re-sending a `functionCall` — in practice the exhausted provider keeps
+failing, so the whole conversation stays on Groq; one more env key to manage
+(`GROQ_API_KEY`, optional).
+
 ## Non-decisions (explicitly deferred)
 
 - **Conversation persistence** (messages table exists in schema but no chat

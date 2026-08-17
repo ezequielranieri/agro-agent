@@ -49,10 +49,18 @@ services:
       # Secrets: Render prompts for a value during Blueprint creation; they
       # are never stored in this file.
       - key: GEMINI_API_KEY
-        sync: false       # required by cmd/api/main.go at startup
+        sync: false       # primary chat provider + embeddings; only required if
+                          # GROQ_API_KEY is unset (cmd/api/main.go needs at least one)
       - key: JWT_SECRET
         sync: false       # required by cmd/api/main.go; the value "change-me"
                           # is rejected at startup
+      # Optional failover provider: if GEMINI_API_KEY 429s (free-tier quota),
+      # the chat falls back to Groq automatically. Without this key the system
+      # runs on Gemini alone. GROQ_MODEL is optional (default llama-3.3-70b-versatile).
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: "llama-3.3-70b-versatile"
       # Render injects PORT automatically for web services; pinning it here
       # just makes the value explicit. cmd/api/main.go defaults to 8080.
       - key: PORT
