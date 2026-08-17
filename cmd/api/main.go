@@ -105,12 +105,16 @@ func main() {
 	// applier (que materializa la aprobación en UNA transacción: re-validación
 	// + decisión condicional + INSERT) y el auditor. TTL de 24h: la solicitud
 	// muere sola si nadie la aprueba.
+	// El resolver de identidad UUID (agro-iam) se comparte entre el middleware
+	// HTTP (tenant del claim → id interno) y el service de approvals (sub del
+	// claim → actor interno, acotado al tenant).
+	tenantStore := pg.NewTenantStore(pool)
 	approvalSvc := approval.New(
 		pg2.NewApprovalStore(pool),
 		pg2.NewApplier(pool),
 		pg2.NewAuditor(pool),
 		24*time.Hour,
-	)
+	).SetUserResolver(tenantStore)
 	reg := tools.NewRegistry(
 		tools.ConsultarAplicaciones(appsStore),
 		tools.ConsultarLotes(loteStore),
@@ -131,6 +135,9 @@ func main() {
 		os.Exit(1)
 	}
 	srv := httpapi.New(ag, verifier, approvalSvc, loteStore, appsStore)
+	// Accept-both del tenant: entero (demo) directo, UUID (agro-iam) resuelto
+	// vía tenants.uuid. Sin esto, un token real de agro-iam daría 401.
+	srv.SetTenantResolver(tenantStore)
 
 	// Sin ReadTimeout global a propósito: el SSE del chat necesita conexiones
 	// long-lived. El ReadHeaderTimeout frena a los clientes que no terminan de

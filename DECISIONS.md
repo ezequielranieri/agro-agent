@@ -43,22 +43,20 @@ the constraint level.
 project's threat model (the LLM is the attacker, not a compromised DBA) the
 context-carried tenant plus constraint-level protection is the right size.
 
-## AD-003 · Local JWT verification, same HS256/JWT shape (not byte-compatible with agro-iam)
+## AD-003 · Local JWT verification — same HS256/JWT shape, accept-both identity vocabulary
 
-**Status:** accepted · **Scope:** auth
+**Status:** accepted · **Scope:** auth + middleware + approval actor
 
-**Decision:** agro-agent *validates* HS256 JWTs with the same claim shape it
-issues via `cmd/mktoken` (`internal/auth/verifier.go`): `sub`, an integer
-`tenant_id`, `role` (`admin`/`agronomo`/`productor`), `iat`, `exp`, 15 min
-TTL. It **never mints tokens** — `cmd/mktoken` is dev-only. The verifier
-rejects empty `sub`/`tenant_id` and an empty secret at boot.
-
-agro-iam compatibility is **NOT implemented**: agro-iam uses UUID `tenant_id`s
-and English role codes (`agronomist`/`producer`/`auditor`/`hauler`), so a live
-agro-iam token would fail here today — 401 on the integer `tenant_id` parse
-(`strconv.ParseInt`) or 403 on the role check. Closing that gap (UUID tenant
-parsing + role vocabulary alignment) is future work, documented in the README
-Roadmap.
+**Decision:** agro-agent *validates* HS256 JWTs locally against a shared
+`JWT_SECRET` (`internal/auth/verifier.go`): `sub`, `tenant_id`, `role`, `iat`,
+`exp`, 15 min TTL. Empty `sub`/`tenant_id`, a non-HS256 signing method, and an
+empty secret at boot are all rejected. It **never mints tokens** —
+`cmd/mktoken` is dev-only. Since [AD-015](#ad-015--accept-both-jwt-intake-integer--uuid-tenant-role-normalization),
+the intake is **accept-both**: an integer `tenant_id` (demo `mktoken`) is used
+directly, while a UUID `tenant_id` (agro-iam) is resolved to the internal id
+via `tenants.uuid`; English role codes (`agronomist`/`producer`/...) are
+normalized to the local vocabulary (`agronomo`/`productor`/...), and a UUID
+`sub` resolves via `users.uuid` scoped to the request tenant.
 
 **Why:** agro-iam is a separate module whose internals are not importable
 (they live in `internal/`). Validating locally with a shared `JWT_SECRET` is
@@ -66,9 +64,38 @@ the real microservice pattern: zero coupling, no auth network call per
 request.
 
 **Trade-off:** a compromised `JWT_SECRET` breaks both services; rotation must
-be coordinated. That's normal for HS256 shared-secret setups. The honest
-caveat: agro-agent and agro-iam share a token *format*, not a token contract —
-live agro-iam tokens are not accepted until the claim vocabulary is aligned.
+be coordinated. That's normal for HS256 shared-secret setups. The DB keeps an
+internal BIGINT `id` plus a `uuid` mapping column — two identities that must
+stay in sync (see AD-015).
+
+## AD-015 · Accept-both JWT intake (integer + UUID tenant, role normalization)
+
+**Status:** accepted · **Scope:** internal/store, internal/httpapi, internal/approval, db
+
+**Decision:** the JWT intake boundary accepts both identity vocabularies. An
+integer `tenant_id` (demo `cmd/mktoken`) is used directly; a UUID `tenant_id`
+(agro-iam) is resolved through a new port — `store.TenantStore` — implemented
+by `pg.TenantStore` against the `tenants.uuid` column (`ResolveTenantByUUID`).
+Roles are normalized once at ingestion (`agronomist`→`agronomo`,
+`producer`→`productor`, `admin`→`admin`; `auditor`/`hauler` map to empty so
+`requireRole` fails them with 403). A UUID `sub` resolves to the internal actor
+via `approval.UserResolver` → `pg.TenantStore.ResolveUserByUUID`, always scoped
+to the request tenant. The mapping columns `tenants.uuid`/`users.uuid` live in
+migration `003_uuid_identity.sql` (and in `schema.sql` for fresh databases),
+with fixed demo values in `seed.sql`. All failures stay fail-closed under the
+pre-existing uniform contract (401 for any token/tenant failure, 500 for an
+unresolvable actor); the token security model (HS256 pinned, hash-only approval
+tokens, constant-time compare) is untouched.
+
+**Why:** real agro-iam tokens now authenticate end-to-end while the integer
+demo keeps running unchanged — one intake, two vocabularies, and no
+`domain.TenantID` migration (the 13 `tenant_id BIGINT` columns stay).
+
+**Trade-off:** two vocabulary worlds (integer + UUID) must stay in sync, and
+the demo DB and agro-iam's DB are separate: the UUIDs in a real token must
+exist in agro-agent's `tenants`/`users` tables, otherwise the request gets a
+401. The domain still sees an int64 `TenantID`; the UUID columns are the only
+addition.
 
 ## AD-004 · Gemini model pinning + the thought_signature dance
 

@@ -44,23 +44,21 @@ modelo de amenazas de este proyecto (el atacante es el LLM, no un DBA
 comprometido), el tenant en contexto + protección a nivel de constraint es el
 tamaño correcto.
 
-## AD-003 · Verificación JWT local, misma forma HS256/JWT (no byte-compatible con agro-iam)
+## AD-003 · Verificación JWT local — misma forma HS256/JWT, vocabulario de identidad accept-both
 
-**Estado:** aceptada · **Alcance:** auth
+**Estado:** aceptada · **Alcance:** auth + middleware + actor de approvals
 
-**Decisión:** agro-agent *valida* JWTs HS256 con la misma forma de claims que
-emite vía `cmd/mktoken` (`internal/auth/verifier.go`): `sub`, un `tenant_id`
-entero, `role` (`admin`/`agronomo`/`productor`), `iat`, `exp`, TTL 15 min.
-**Nunca emite tokens** — `cmd/mktoken` es solo dev. El verifier rechaza
-`sub`/`tenant_id` vacíos y un secret vacío al boot.
-
-La compatibilidad con agro-iam **no** está implementada: agro-iam usa
-`tenant_id` UUID y códigos de rol en inglés
-(`agronomist`/`producer`/`auditor`/`hauler`), así que un token real de agro-iam
-fallaría hoy aquí — 401 por el parseo del `tenant_id` entero
-(`strconv.ParseInt`) o 403 por el check de rol. Cerrar esa brecha (parseo de
-tenant UUID + alineación de vocabulario de roles) es trabajo futuro,
-documentado en el Roadmap del README.
+**Decisión:** agro-agent *valida* JWTs HS256 localmente contra un `JWT_SECRET`
+compartido (`internal/auth/verifier.go`): `sub`, `tenant_id`, `role`, `iat`,
+`exp`, TTL 15 min. `sub`/`tenant_id` vacíos, un método de firma distinto de
+HS256 y un secret vacío al boot se rechazan todos. **Nunca emite tokens** —
+`cmd/mktoken` es solo dev. Desde [AD-015](#ad-015--ingesta-accept-both-de-jwt-tenant-entero--uuid-normalización-de-roles),
+la ingesta es **accept-both**: un `tenant_id` entero (demo `mktoken`) se usa
+directo, mientras que un `tenant_id` UUID (agro-iam) se resuelve al id interno
+vía `tenants.uuid`; los códigos de rol en inglés
+(`agronomist`/`producer`/...) se normalizan al vocabulario local
+(`agronomo`/`productor`/...), y un `sub` UUID se resuelve vía `users.uuid`
+acotado al tenant del request.
 
 **Por qué:** agro-iam es un módulo aparte cuyos internos no son importables
 (viven en `internal/`). Validar localmente con un `JWT_SECRET` compartido es
@@ -68,10 +66,40 @@ el patrón real de microservicios: cero acoplamiento, sin llamada de auth por
 request.
 
 **Trade-off:** un `JWT_SECRET` comprometido rompe ambos servicios; la rotación
-debe coordinarse. Normal en setups de secret compartido HS256. La salvedad
-honesta: agro-agent y agro-iam comparten un *formato* de token, no un
-contrato — los tokens reales de agro-iam no se aceptan hasta alinear el
-vocabulario de claims.
+debe coordinarse. Normal en setups de secret compartido HS256. La DB mantiene
+un `id` BIGINT interno más una columna de mapeo `uuid` — dos identidades que
+deben mantenerse en sincronía (ver AD-015).
+
+## AD-015 · Ingesta accept-both de JWT (tenant entero + UUID, normalización de roles)
+
+**Estado:** aceptada · **Alcance:** internal/store, internal/httpapi, internal/approval, db
+
+**Decisión:** la frontera de ingesta del JWT acepta ambos vocabularios de
+identidad. Un `tenant_id` entero (demo `cmd/mktoken`) se usa directo; un
+`tenant_id` UUID (agro-iam) se resuelve por un puerto nuevo —
+`store.TenantStore` — implementado por `pg.TenantStore` contra la columna
+`tenants.uuid` (`ResolveTenantByUUID`). Los roles se normalizan una vez en la
+ingesta (`agronomist`→`agronomo`, `producer`→`productor`, `admin`→`admin`;
+`auditor`/`hauler` se mapean a vacío para que `requireRole` los rechace con
+403). Un `sub` UUID se resuelve al actor interno vía `approval.UserResolver` →
+`pg.TenantStore.ResolveUserByUUID`, siempre acotado al tenant del request. Las
+columnas de mapeo `tenants.uuid`/`users.uuid` viven en la migración
+`003_uuid_identity.sql` (y en `schema.sql` para bases nuevas), con valores demo
+fijos en `seed.sql`. Todos los fallos quedan fail-closed bajo el contrato
+uniforme previo (401 para todo fallo de token/tenant, 500 para un actor
+irresoluble); el modelo de seguridad del token (HS256 fijado, tokens de
+aprobación solo-hash, comparación en tiempo constante) queda intacto.
+
+**Por qué:** los tokens reales de agro-iam ahora autentican de punta a punta
+mientras la demo con enteros sigue corriendo sin cambios — una ingesta, dos
+vocabularios, y sin migrar `domain.TenantID` (las 13 columnas `tenant_id
+BIGINT` se mantienen).
+
+**Trade-off:** dos mundos de vocabulario (entero + UUID) deben mantenerse en
+sincronía, y la base de la demo y la de agro-iam son separadas: los UUIDs de un
+token real deben existir en las tablas `tenants`/`users` de agro-agent, si no
+el request recibe 401. El dominio sigue viendo un `TenantID` int64; las
+columnas UUID son la única adición.
 
 ## AD-004 · Modelo Gemini fijado + la danza de thought_signature
 

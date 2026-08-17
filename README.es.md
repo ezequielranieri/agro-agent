@@ -148,7 +148,7 @@ el LLM real.
 | Autoridad de escritura | Tokens HITL: 32 bytes aleatorios opacos, guardados solo como SHA-256, comparación timing-safe |
 | Re-validación de contexto | Aprobar re-parsea el payload y re-resuelve los IDs dentro del tenant antes de insertar |
 | Comportamiento del modelo | Temperatura 0.2, prompt de sistema que prohíbe inventar datos, harness de evals que lo impone |
-| Auth | JWT HS256 verificado localmente (`sub`/`tenant_id`/`role`, TTL 15 min); la demo emite tokens con `cmd/mktoken`, con la misma forma HS256/JWT que agro-iam. La conexión live con agro-iam **no** está implementada (ids de tenant UUID, códigos de rol en inglés) — ver [Integración con agro-iam](#integración-con-agro-iam). agro-agent nunca emite tokens por sí solo |
+| Auth | JWT HS256 verificado localmente (`sub`/`tenant_id`/`role`, TTL 15 min); **ingesta accept-both**: el `tenant_id` entero (demo `cmd/mktoken`) se usa directo, el `tenant_id` UUID (agro-iam) se resuelve vía `tenants.uuid`, los códigos de rol en inglés se normalizan (`agronomist`→`agronomo`, `producer`→`productor`; `auditor`/`hauler` no tienen rol local de escritura → 403) y un `sub` UUID se resuelve vía `users.uuid` acotado al tenant — ver [Integración con agro-iam](#integración-con-agro-iam). agro-agent nunca emite tokens por sí solo |
 
 ## Inicio rápido
 
@@ -199,19 +199,44 @@ GEMINI_API_KEY=... go run ./cmd/eval --writes   # incluir casos de escritura
 
 Token de desarrollo (nunca en producción): `JWT_SECRET=... go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo`
 (el tool se auto-verifica el token contra el verifier real del backend antes de imprimirlo).
+Token agro-iam-style (tenant UUID + rol en inglés, con los UUIDs demo fijos del
+seed): `JWT_SECRET=... go run ./cmd/mktoken -uuid -role agronomist -exp 24h`.
 
 ### Integración con agro-iam
 
-Estado honesto: agro-agent autentica contra el **mismo formato HS256/JWT** que
-usa agro-iam (`sub`/`tenant_id`/`role`, TTL 15 min), así que el flujo demo
-funciona con tokens emitidos por `cmd/mktoken` y las formas son deliberadamente
-compatibles. **La conexión live con agro-iam NO está implementada**: agro-iam
-usa `tenant_id` UUID y códigos de rol en inglés (`agronomist`/`producer`/...),
-mientras agro-agent espera un `tenant_id` entero y roles en español
-(`admin`/`agronomo`/`productor`). Un token real de agro-iam fallaría hoy aquí
-la verificación o los checks de rol. Cerrar esa brecha (parseo de tenant UUID +
-alineación de vocabulario de roles) es trabajo futuro; el código de auth en sí
-(`internal/auth`, `requireAuth`) queda intencionalmente sin cambios.
+**Implementada — ingesta accept-both de JWT** (ver [AD-015](./DECISIONS.es.md)):
+la capa de auth acepta la misma forma HS256/JWT que emite agro-iam
+(`sub`/`tenant_id`/`role`, TTL 15 min) en **ambos** vocabularios de identidad:
+
+- **`tenant_id` entero** (demo `cmd/mktoken`) se usa directo como `TenantID`
+  interno.
+- **`tenant_id` UUID** (agro-iam) se resuelve al id interno vía la columna
+  `tenants.uuid` (`ResolveTenantByUUID`). Un UUID que no exista en la tabla
+  `tenants` de agro-agent se rechaza con el mismo **401** uniforme que un
+  entero mal formado.
+- **Roles en inglés** se normalizan una vez en la ingesta: `agronomist`→
+  `agronomo`, `producer`→`productor`; `admin` queda `admin`. `auditor`/`hauler`
+  no tienen equivalente local de escritura y se mapean a rol vacío, así
+  `requireRole` (aprobar/rechazar) los rechaza con **403** — quedan solo
+  lectura.
+- **`sub` UUID** (usuario de agro-iam) se resuelve al actor interno vía la
+  columna `users.uuid` **acotado al tenant del request**
+  (`ResolveUserByUUID`): un usuario de agro-iam de otra cooperativa jamás
+  resuelve acá.
+
+La demo sigue funcionando sin cambios: `cmd/mktoken -tenant 1 -user 2 -role
+agronomo` sigue emitiendo tokens enteros con rol en español que evitan los
+resolvers por completo.
+
+**Salvedad — bases separadas:** agro-iam y agro-agent tienen cada uno su propia
+base. Un token real de agro-iam solo funciona si los UUIDs de sus claims
+existen en las tablas `tenants`/`users` de agro-agent — el seed fija los demo
+(tenant `11111111-1111-4111-8111-111111111111`, user
+`22222222-2222-4222-8222-222222222222`) para que los tokens de `mktoken -uuid`
+resuelvan. Un token para un tenant de agro-iam que **no tiene fila** en
+agro-agent recibe 401. Migraciones: `db/migrations/003_uuid_identity.sql`
+agrega las columnas y fija los UUIDs demo en bases existentes; las bases nuevas
+los reciben vía `schema.sql` + `seed.sql`.
 
 ### Cuota del LLM
 
@@ -221,6 +246,59 @@ chat tiene límite de tasa por IP (default 10 req/min, `CHAT_RATE_LIMIT`), pero
 en picos la cuota diaria puede agotarse igual — esperar errores
 `429`/`RESOURCE_EXHAUSTED` que la capa de proveedor reintenta una vez
 (acotada) antes de propagarlos.
+
+## Deploy
+
+Desplegá en [Render](https://render.com) con el blueprint
+[`render.yaml`](./render.yaml) incluido:
+
+1. Subí este repo a GitHub/GitLab y creá una **Blueprint Instance**
+   (Dashboard → New → Blueprint Instance → conectá el repo). Render detecta
+   `render.yaml` solo.
+2. Render provisiona el servicio **Postgres** (`agro-db`) y compila la API
+   desde [`./Dockerfile`](./Dockerfile) (multi-stage: binario Go estático sobre
+   `alpine:3.20`, usuario no-root, certs de CA para las llamadas HTTPS a
+   Gemini).
+3. Durante la creación del Blueprint Render pide una vez los secretos:
+   - `GEMINI_API_KEY` — clave de Gemini (chat + embeddings).
+   - `JWT_SECRET` — clave HS256 compartida con quien emite los tokens del
+     frontend.
+   `AGRO_DATABASE_URL` se conecta automáticamente al servicio Postgres
+   (`fromDatabase → connectionString`).
+4. **Sembrá la base UNA vez.** El Blueprint no tiene tipo de servicio "job
+   one-off" y el contenedor web no trae `psql`, así que aplicá el schema+seed
+   una vez contra la connection string de la base (agro-db → Info en el
+   Dashboard), p. ej.:
+
+   ```bash
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
+   ```
+
+   `schema.sql` necesita la extensión `pgvector`, que el Postgres manejado de
+   Render soporta. `seed.sql` **no es idempotente** (ids demo fijos) — corrélo
+   exactamente una vez.
+5. Health check: Render sondea `GET /healthz` (público, sin auth).
+
+Variables de entorno que usa `cmd/api/main.go`:
+
+| Variable | Propósito |
+|---|---|
+| `AGRO_DATABASE_URL` | DSN pgx (auto-conectada vía `fromDatabase`) |
+| `GEMINI_API_KEY` | requerida al boot |
+| `JWT_SECRET` | requerida al boot; el valor `change-me` se rechaza |
+| `PORT` | la inyecta Render; default en el código `8080` |
+| `CHAT_RATE_LIMIT` | opcional, límite de chat por IP (default 10 req/min) |
+
+Advertencias honestas:
+
+- **El free tier de Render duerme** después de ~15 min sin tráfico; el primer
+  request después de dormir sufre un cold start lento. Usá un plan pago para
+  cualquier uso real.
+- **El free tier de Gemini es ajustado para producción** (5 req/min, 20/día; el
+  agente puede llamar al LLM hasta 5 veces por request). Esperá `429` /
+  `RESOURCE_EXHAUSTED` y el reintento acotado incluido.
+- El plan free de Postgres es de un solo nodo y está pensado para demos; elegí
+  un plan pago si querés datos durables.
 
 ## Testing
 
@@ -257,7 +335,7 @@ Todo verde hoy: build + vet + 60+ tests.
 - [x] Evals — golden set, harness de routing + anti-alucinación + discernimiento
 - [ ] Corrida live del eval (cuota diaria free tier)
 - [ ] Deploy (render.com, como agro-iam)
-- [ ] Conexión live con agro-iam — ids de tenant UUID + alineación de vocabulario de roles
+- [x] Conexión live con agro-iam — ingesta accept-both: tenant UUID vía `tenants.uuid`, normalización de roles en inglés, `sub` UUID vía `users.uuid` acotado al tenant (AD-015)
 
 ## Licencia
 

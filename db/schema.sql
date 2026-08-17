@@ -26,6 +26,9 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- -----------------------------------------------------------------------------
 CREATE TABLE tenants (
     id          BIGSERIAL PRIMARY KEY,
+    -- uuid: identidad externa (agro-iam). El middleware traduce el claim
+    -- tenant_id UUID del JWT al id BIGINT interno vía esta columna.
+    uuid        uuid        NOT NULL UNIQUE DEFAULT gen_random_uuid(),
     name        TEXT        NOT NULL,
     slug        TEXT        NOT NULL UNIQUE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -34,6 +37,9 @@ CREATE TABLE tenants (
 -- roles: un rol por usuario en este tenant (simplificación consciente).
 CREATE TABLE users (
     id            BIGSERIAL PRIMARY KEY,
+    -- uuid: identidad externa (agro-iam). El claim sub (UUID) del JWT se
+    -- resuelve al id BIGINT interno vía esta columna, acotado al tenant.
+    uuid          uuid        NOT NULL UNIQUE DEFAULT gen_random_uuid(),
     tenant_id     BIGINT      NOT NULL REFERENCES tenants(id),
     email         TEXT        NOT NULL,
     display_name  TEXT        NOT NULL,

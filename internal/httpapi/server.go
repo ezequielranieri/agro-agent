@@ -28,8 +28,12 @@ type Server struct {
 	approvals       *approval.Service
 	loteStore       store.LoteStore
 	aplicacionStore store.AplicacionStore
-	limiter         *rateLimiter
-	log             *slog.Logger
+	// tenantResolver traduce el tenant UUID de agro-iam al id interno
+	// (tenants.uuid → id). Opcional: sin él, solo se aceptan tenants enteros
+	// (demo mktoken) y cualquier tenant UUID falla 401 (fail-closed).
+	tenantResolver store.TenantStore
+	limiter        *rateLimiter
+	log            *slog.Logger
 }
 
 // New arma el server. El logger por defecto va a stdout con formato texto
@@ -50,6 +54,14 @@ func New(ag *agent.Agent, verifier *auth.Verifier, approvals *approval.Service, 
 		limiter: newRateLimiter(rateLimitFromEnv()),
 		log:     slog.New(slog.NewTextHandler(os.Stdout, nil)),
 	}
+}
+
+// SetTenantResolver inyecta el resolver de tenants UUID (agro-iam). Opcional:
+// sin él, el middleware solo acepta tenant_id entero (demo mktoken). Devuelve
+// el server para encadenar (p. ej. srv.SetTenantResolver(x).Handler()).
+func (s *Server) SetTenantResolver(r store.TenantStore) *Server {
+	s.tenantResolver = r
+	return s
 }
 
 // Handler devuelve el mux completo con los middlewares aplicados.

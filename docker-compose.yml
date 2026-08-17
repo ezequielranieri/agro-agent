@@ -14,6 +14,9 @@ services:
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
       - ./db/migrations/002_pgvector.sql:/docker-entrypoint-initdb.d/03_pgvector.sql:ro
+      # La 003 es idempotente (IF NOT EXISTS): el schema ya trae las columnas,
+      # este paso solo re-pinea los UUIDs demo por si el orden cambiara.
+      - ./db/migrations/003_uuid_identity.sql:/docker-entrypoint-initdb.d/04_uuid_identity.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d agro"]
       interval: 5s

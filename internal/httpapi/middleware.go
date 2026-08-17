@@ -48,9 +48,38 @@ func writeJSONErr(w http.ResponseWriter, status int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// roleMap traduce los códigos de rol de agro-iam (inglés) a los locales del
+// ecosistema (lo que entiende requireRole / la DB). admin pasa igual;
+// agronomist→agronomo y producer→productor; auditor y hauler NO tienen
+// equivalente local → quedan vacíos, así requireRole los rechaza con 403
+// (son roles de solo lectura). Los roles locales (mktoken) no están en el map
+// y pasan intactos; cualquier código desconocido también queda como está
+// (requireRole decide).
+var roleMap = map[string]string{
+	"admin":      "admin",
+	"agronomist": "agronomo",
+	"producer":   "productor",
+	"auditor":    "",
+	"hauler":     "",
+}
+
+// normalizeRole aplica el mapeo UNA vez en la ingesta del claim: requireRole
+// (y cualquier consumidor de identity.RoleFrom) ya ve el rol local.
+func normalizeRole(role string) string {
+	if mapped, ok := roleMap[role]; ok {
+		return mapped
+	}
+	return role
+}
+
 // requireAuth valida el Bearer token y aísla el request en su tenant.
 // Falla cerrado en el primer desvío: sin header, scheme mal, token inválido
-// o tenant no numérico → el MISMO 401 uniforme.
+// o tenant irresoluble → el MISMO 401 uniforme.
+//
+// El tenant del claim se acepta en dos vocabularios (accept-both):
+//   - entero (demo mktoken): se usa directo como TenantID.
+//   - UUID (agro-iam): se resuelve vía s.tenantResolver (tenants.uuid → id).
+//     Un UUID que no existe en la DB es 401, igual que un int mal formado.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authz := r.Header.Get("Authorization")
@@ -67,19 +96,31 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// El tenant viaja como int64 (el claim es string en el JWT). Si el
-		// emisor mandó algo no numérico, el token es inválido: nunca dejar
-		// pasar un tenant fantasma.
-		tid, err := strconv.ParseInt(claims.TenantID, 10, 64)
+		// 1) Camino demo (mktoken): tenant entero, se usa directo.
+		if n, err := strconv.ParseInt(claims.TenantID, 10, 64); err == nil {
+			ctx := tenant.WithID(r.Context(), domain.TenantID(n))
+			ctx = identity.WithUserRole(ctx, claims.UserID, normalizeRole(claims.Role))
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// 2) Camino agro-iam: tenant UUID, se resuelve a la fila interna.
+		// Sin resolver configurado, un UUID es irresoluble → 401 (fail-closed).
+		if s.tenantResolver == nil {
+			writeJSONErr(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		tid, err := s.tenantResolver.ResolveTenantByUUID(r.Context(), claims.TenantID)
 		if err != nil {
 			writeJSONErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 
-		ctx := tenant.WithID(r.Context(), domain.TenantID(tid))
+		ctx := tenant.WithID(r.Context(), tid)
 		// El actor (user_id/role) vive en internal/identity: las tools del HITL
 		// lo leen sin depender del transporte HTTP (regla de la hexagonalidad).
-		ctx = identity.WithUserRole(ctx, claims.UserID, claims.Role)
+		// El rol se normaliza acá (inglés agro-iam → local) antes de guardarlo.
+		ctx = identity.WithUserRole(ctx, claims.UserID, normalizeRole(claims.Role))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -24,23 +24,33 @@ import (
 const defaultTTL = 24 * time.Hour
 
 // Service es el caso de uso del HITL. Depende solo de puertos (Store,
-// Applier, Auditor): no conoce Postgres ni HTTP.
+// Applier, Auditor, UserResolver): no conoce Postgres ni HTTP.
 type Service struct {
-	store   Store
-	applier Applier
-	auditor Auditor
-	ttl     time.Duration
-	now     func() time.Time // reloj inyectable: los tests fijan fechas
+	store    Store
+	applier  Applier
+	auditor  Auditor
+	resolver UserResolver
+	ttl      time.Duration
+	now      func() time.Time // reloj inyectable: los tests fijan fechas
 }
 
 // New arma el service. ttl <= 0 cae al default (24h); el reloj por defecto es
-// time.Now, los tests inyectan uno fijo.
+// time.Now, los tests inyectan uno fijo. resolver es nil hasta que se inyecte
+// (ver SetUserResolver): sin resolver, el actor debe ser numérico (mktoken).
 func New(store Store, applier Applier, auditor Auditor, ttl time.Duration) *Service {
 	if ttl <= 0 {
 		ttl = defaultTTL
 	}
 	now := time.Now
 	return &Service{store: store, applier: applier, auditor: auditor, ttl: ttl, now: now}
+}
+
+// SetUserResolver inyecta el resolver de usuarios UUID (agro-iam). Devuelve el
+// service para encadenar en la raíz de composición. Sin él, un sub UUID no se
+// puede traducir a actor interno y la operación falla cerrado.
+func (s *Service) SetUserResolver(r UserResolver) *Service {
+	s.resolver = r
+	return s
 }
 
 // newToken genera el token opaco de aprobación: 32 bytes aleatorios en hex
@@ -57,16 +67,25 @@ func newToken() (token, hash string, err error) {
 }
 
 // actorFromCtx extrae y valida el actor del contexto. El user_id viaja como
-// string (claim JWT); acá se convierte a int64 para la DB. Sin actor, una
-// solicitud no tiene dueño: fail-closed.
-func actorFromCtx(ctx context.Context) (int64, error) {
+// string (claim JWT); acá se convierte a int64 para la DB (accept-both):
+//   - entero (demo mktoken): ParseInt directo.
+//   - UUID (agro-iam): se resuelve vía s.resolver (users.uuid → id) acotado al
+//     tenant del request. Un sub irresoluble es un error (fail-closed): el
+//     transporte lo mapea igual que hoy (500), sin filtrar el detalle.
+func (s *Service) actorFromCtx(ctx context.Context, tid domain.TenantID) (int64, error) {
 	actorID := identity.UserIDFrom(ctx)
 	if actorID == "" {
 		return 0, errors.New("approval: no hay user_id en el contexto")
 	}
-	actorInt, err := strconv.ParseInt(actorID, 10, 64)
+	if actorInt, err := strconv.ParseInt(actorID, 10, 64); err == nil {
+		return actorInt, nil
+	}
+	if s.resolver == nil {
+		return 0, fmt.Errorf("approval: user_id no numérico y sin resolver: %q", actorID)
+	}
+	actorInt, err := s.resolver.ResolveUserByUUID(ctx, tid, actorID)
 	if err != nil {
-		return 0, fmt.Errorf("approval: user_id no numérico: %w", err)
+		return 0, fmt.Errorf("approval: resolver user_id %q: %w", actorID, err)
 	}
 	return actorInt, nil
 }
@@ -90,7 +109,7 @@ func (s *Service) CreateRequest(ctx context.Context, action string, payload json
 	if err != nil {
 		return Request{}, fmt.Errorf("approval: crear solicitud: %w", err)
 	}
-	actorInt, err := actorFromCtx(ctx)
+	actorInt, err := s.actorFromCtx(ctx, tid)
 	if err != nil {
 		return Request{}, err
 	}
@@ -152,7 +171,7 @@ func (s *Service) Approve(ctx context.Context, id int64, token string) (domain.A
 	if err != nil {
 		return domain.Aplicacion{}, fmt.Errorf("approval: aprobar: %w", err)
 	}
-	deciderInt, err := actorFromCtx(ctx)
+	deciderInt, err := s.actorFromCtx(ctx, tid)
 	if err != nil {
 		return domain.Aplicacion{}, err
 	}
@@ -207,7 +226,7 @@ func (s *Service) Reject(ctx context.Context, id int64, token string) error {
 	if err != nil {
 		return fmt.Errorf("approval: rechazar: %w", err)
 	}
-	deciderInt, err := actorFromCtx(ctx)
+	deciderInt, err := s.actorFromCtx(ctx, tid)
 	if err != nil {
 		return err
 	}

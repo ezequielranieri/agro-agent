@@ -76,6 +76,14 @@ type Auditor interface {
 	Record(ctx context.Context, tid domain.TenantID, actorID int64, action, tool string, params, result any) error
 }
 
+// UserResolver traduce el sub UUID de agro-iam al id de usuario interno. La
+// resolución SIEMPRE está acotada al tenant del request (un usuario de otra
+// cooperativa no resuelve). Es opcional: sin él, el actor solo se acepta
+// numérico (demo mktoken) y cualquier sub UUID falla cerrado.
+type UserResolver interface {
+	ResolveUserByUUID(ctx context.Context, tid domain.TenantID, uuid string) (int64, error)
+}
+
 // AplicacionPayload es el contrato de la tool `programar_aplicacion` y, a la
 // vez, lo que se re-valida al aprobar. Se guarda como payload en la DB y se
 // re-parsea en el approve (fail-closed, con DisallowUnknownFields) para que un

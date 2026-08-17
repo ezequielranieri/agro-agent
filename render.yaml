@@ -1,0 +1,62 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec)
+#
+# Deploy: Dashboard -> New -> Blueprint Instance -> connect this repo.
+# Render provisions the Postgres database, builds ./Dockerfile for the API and
+# prompts once for the two secrets (GEMINI_API_KEY, JWT_SECRET).
+#
+# DATABASE SEEDING — read before deploying:
+# Render Blueprint has no "one-off job" service type (service types are
+# web/pserv/worker/cron/keyvalue; Postgres is declared under the `databases`
+# list). `preDeployCommand` on a Docker-based service runs inside the built
+# container, which only contains the /app/api binary (no psql, no SQL files),
+# so it cannot seed the database either. Seed ONCE after the database is
+# provisioned, using the connection string from the agro-db -> Info page in
+# the Dashboard (any machine with psql installed works):
+#
+#   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
+#
+# Both files are psql -f compatible (no \connect, no DO blocks). seed.sql uses
+# relative dates (CURRENT_DATE) but it is NOT idempotent (fixed demo ids), so
+# run it exactly once. schema.sql requires the pgvector extension, which
+# Render managed Postgres supports (CREATE EXTENSION vector, PG 13+).
+#
+# After the seed is applied the API runs standalone; re-running it on a
+# populated database would fail the inserts (ON_ERROR_STOP=1).
+
+databases:
+  - name: agro-db
+    plan: free            # single-node instance for demos; pick a paid plan
+                          # for durable data / any real load
+    databaseName: agro
+    user: agro
+
+services:
+  - type: web
+    runtime: docker       # replaces the deprecated `env: docker`
+    name: agro-agent-api
+    plan: free            # free tier sleeps after inactivity -> slow cold
+                          # starts; use `starter` for anything resembling
+                          # real use
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz   # GET /healthz is public, returns 200 "ok"
+    envVars:
+      # Wire the DB connection string from the Postgres service above.
+      # cmd/api/main.go reads AGRO_DATABASE_URL (pgx DSN).
+      - key: AGRO_DATABASE_URL
+        fromDatabase:
+          name: agro-db
+          property: connectionString
+      # Secrets: Render prompts for a value during Blueprint creation; they
+      # are never stored in this file.
+      - key: GEMINI_API_KEY
+        sync: false       # required by cmd/api/main.go at startup
+      - key: JWT_SECRET
+        sync: false       # required by cmd/api/main.go; the value "change-me"
+                          # is rejected at startup
+      # Render injects PORT automatically for web services; pinning it here
+      # just makes the value explicit. cmd/api/main.go defaults to 8080.
+      - key: PORT
+        value: "8080"
+      # Optional: per-IP chat rate limit (requests/minute). Code default: 10.
+      - key: CHAT_RATE_LIMIT
+        value: "10"

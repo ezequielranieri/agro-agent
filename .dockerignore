@@ -1,0 +1,12 @@
+# Keep large and machine-local artifacts out of the Docker build context.
+.git
+.gitignore
+.codegraph
+.atl
+bin/
+*.exe
+*.exe~
+*.test
+*.out
+coverage.txt
+vendor/

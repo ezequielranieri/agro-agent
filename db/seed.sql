@@ -22,20 +22,26 @@ BEGIN;
 
 -- -----------------------------------------------------------------------------
 -- Tenant
+--   uuid Fijo (11111111-1111-4111-8111-111111111111): es el que
+--   `cmd/mktoken -uuid` usa como tenant_id del token agro-iam-style. Sin valor
+--   fijo, el demo y un token real de agro-iam no podrían compartir identidad.
 -- -----------------------------------------------------------------------------
-INSERT INTO tenants (id, name, slug) VALUES
-    (1, 'Cooperativa La Esperanza', 'la-esperanza');
+INSERT INTO tenants (id, uuid, name, slug) VALUES
+    (1, '11111111-1111-4111-8111-111111111111', 'Cooperativa La Esperanza', 'la-esperanza');
 
 -- -----------------------------------------------------------------------------
 -- Usuarios
+--   El user 2 (Carlos, agronomo) tiene uuid FIJO (22222222-2222-4222-8222-
+--   222222222222): es el sub del token agro-iam-style que aprueba acciones.
+--   El resto usa gen_random_uuid() (mismo efecto que el DEFAULT de la columna).
 -- -----------------------------------------------------------------------------
-INSERT INTO users (id, tenant_id, email, display_name, role) VALUES
-    (1, 1, 'ana.torres@la-esperanza.coop',  'Ana Torres',   'admin'),
-    (2, 1, 'carlos.gutierrez@la-esperanza.coop', 'Carlos Gutiérrez', 'agronomo'),
-    (3, 1, 'marta.rios@la-esperanza.coop',  'Marta Ríos',   'agronomo'),
-    (4, 1, 'pedro.sanchez@la-esperanza.coop', 'Pedro Sánchez', 'productor'),
-    (5, 1, 'jorge.fernandez@la-esperanza.coop', 'Jorge Fernández', 'productor'),
-    (6, 1, 'lucia.molina@la-esperanza.coop', 'Lucía Molina', 'productor');
+INSERT INTO users (id, uuid, tenant_id, email, display_name, role) VALUES
+    (1, gen_random_uuid(), 1, 'ana.torres@la-esperanza.coop',  'Ana Torres',   'admin'),
+    (2, '22222222-2222-4222-8222-222222222222', 1, 'carlos.gutierrez@la-esperanza.coop', 'Carlos Gutiérrez', 'agronomo'),
+    (3, gen_random_uuid(), 1, 'marta.rios@la-esperanza.coop',  'Marta Ríos',   'agronomo'),
+    (4, gen_random_uuid(), 1, 'pedro.sanchez@la-esperanza.coop', 'Pedro Sánchez', 'productor'),
+    (5, gen_random_uuid(), 1, 'jorge.fernandez@la-esperanza.coop', 'Jorge Fernández', 'productor'),
+    (6, gen_random_uuid(), 1, 'lucia.molina@la-esperanza.coop', 'Lucía Molina', 'productor');
 
 -- -----------------------------------------------------------------------------
 -- Lotes (Carlos responde lotes 1-8, Marta lotes 9-18)

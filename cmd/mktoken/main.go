@@ -10,6 +10,13 @@
 //	go run ./cmd/mktoken -secret "$JWT_SECRET" -tenant 1 -user 42 -role admin
 //	go run ./cmd/mktoken -tenant 1 -user 2 -role agronomo -exp 24h   # dev local
 //
+// Token agro-iam-style (tenant/sub UUID + rol en inglés). -uuid usa los UUID
+// fijos del seed demo: el middleware los resuelve vía tenants.uuid/users.uuid.
+// -tenant/-user explícitos ganan sobre los defaults de -uuid:
+//
+//	go run ./cmd/mktoken -uuid -role agronomist -exp 24h
+//	go run ./cmd/mktoken -uuid -role agronomist -user 22222222-2222-4222-8222-222222222222
+//
 // El secret sale de JWT_SECRET (env) o del flag -secret. El flag es el
 // fallback para shells sin env configurado; la env evita que el secret quede
 // en el historial del shell.
@@ -48,7 +55,25 @@ func main() {
 	// dev local explícitamente puede pedir más (p.ej. -exp 24h) cuando sabe
 	// que el token va a vivir en el .env.local del frontend un día entero.
 	exp := flag.Duration("exp", 15*time.Minute, "duración del token (p.ej. 24h para dev local)")
+	// -uuid usa los UUID fijos del seed demo: tenant 11111111-... y user
+	// 22222222-... (los claims ya son strings, así que nada bloquea UUIDs).
+	// Solo cambia los DEFAULTS: si el dev pasa -tenant/-user explícitos, esos
+	// valores ganan.
+	uuidDemo := flag.Bool("uuid", false, "usar los UUID fijos del seed demo (tenant 11111111-1111-4111-8111-111111111111, user 22222222-2222-4222-8222-222222222222) en vez de los ids enteros por defecto")
 	flag.Parse()
+
+	if *uuidDemo {
+		// flag.Visit solo visita los flags que el usuario seteó explícitamente:
+		// así -uuid no pisa un -tenant/-user escrito a mano.
+		set := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["tenant"] {
+			*tenant = "11111111-1111-4111-8111-111111111111"
+		}
+		if !set["user"] {
+			*user = "22222222-2222-4222-8222-222222222222"
+		}
+	}
 
 	// El secret sale de la env primero (no ensucia el historial del shell);
 	// el flag es el fallback explícito.
