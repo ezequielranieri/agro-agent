@@ -1,34 +1,31 @@
 # Render Blueprint (https://render.com/docs/blueprint-spec)
 #
 # Deploy: Dashboard -> New -> Blueprint Instance -> connect this repo.
-# Render provisions the Postgres database, builds ./Dockerfile for the API and
-# prompts once for the two secrets (GEMINI_API_KEY, JWT_SECRET).
+# Render builds ./Dockerfile for the API and prompts once for the secrets
+# (AGRO_DATABASE_URL, GEMINI_API_KEY, JWT_SECRET, GROQ_API_KEY).
 #
-# DATABASE SEEDING — read before deploying:
-# Render Blueprint has no "one-off job" service type (service types are
-# web/pserv/worker/cron/keyvalue; Postgres is declared under the `databases`
-# list). `preDeployCommand` on a Docker-based service runs inside the built
-# container, which only contains the /app/api binary (no psql, no SQL files),
-# so it cannot seed the database either. Seed ONCE after the database is
-# provisioned, using the connection string from the agro-db -> Info page in
-# the Dashboard (any machine with psql installed works):
+# WHY NO `databases:` SECTION — read before deploying:
+# Render allows only ONE free-tier Postgres per account ("cannot have more than
+# one active free tier database"). To keep this deploy free and decoupled from
+# the hosting provider, the Postgres lives OUTSIDE Render on Neon
+# (serverless Postgres, free tier, pgvector included):
 #
-#   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
+#   1. Create a Neon project: https://neon.tech -> New Project -> region near
+#      your users (us-east-2 works well for Render oregon/ohio).
+#      Copy the "connection string" (pooled or direct; the backend uses pgx,
+#      which accepts the full postgresql:// DSN).
+#   2. Paste it as the AGRO_DATABASE_URL secret when Render prompts.
+#   3. Seed ONCE from your machine against that same DSN:
 #
-# Both files are psql -f compatible (no \connect, no DO blocks). seed.sql uses
-# relative dates (CURRENT_DATE) but it is NOT idempotent (fixed demo ids), so
-# run it exactly once. schema.sql requires the pgvector extension, which
-# Render managed Postgres supports (CREATE EXTENSION vector, PG 13+).
+#        psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
 #
-# After the seed is applied the API runs standalone; re-running it on a
-# populated database would fail the inserts (ON_ERROR_STOP=1).
-
-databases:
-  - name: agro-db
-    plan: free            # single-node instance for demos; pick a paid plan
-                          # for durable data / any real load
-    databaseName: agro
-    user: agro
+#      Both files are psql -f compatible (no \connect, no DO blocks). schema.sql
+#      requires the pgvector extension, which Neon supports natively
+#      (CREATE EXTENSION vector). seed.sql uses relative dates (CURRENT_DATE)
+#      but is NOT idempotent (fixed demo ids) — run it exactly once.
+#
+# After the seed the API runs standalone; re-running it on a populated database
+# fails the inserts (ON_ERROR_STOP=1).
 
 services:
   - type: web
@@ -40,14 +37,12 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz   # GET /healthz is public, returns 200 "ok"
     envVars:
-      # Wire the DB connection string from the Postgres service above.
-      # cmd/api/main.go reads AGRO_DATABASE_URL (pgx DSN).
-      - key: AGRO_DATABASE_URL
-        fromDatabase:
-          name: agro-db
-          property: connectionString
       # Secrets: Render prompts for a value during Blueprint creation; they
       # are never stored in this file.
+      # Postgres DSN from Neon (https://neon.tech). cmd/api/main.go reads
+      # AGRO_DATABASE_URL (pgx DSN). Not fromDatabase: the DB is external.
+      - key: AGRO_DATABASE_URL
+        sync: false
       - key: GEMINI_API_KEY
         sync: false       # primary chat provider + embeddings; only required if
                           # GROQ_API_KEY is unset (cmd/api/main.go needs at least one)

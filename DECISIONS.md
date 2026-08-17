@@ -311,6 +311,29 @@ re-sending a `functionCall` — in practice the exhausted provider keeps
 failing, so the whole conversation stays on Groq; one more env key to manage
 (`GROQ_API_KEY`, optional).
 
+## AD-017 · External Postgres on Neon instead of Render-managed database
+
+**Status:** accepted · **Scope:** render.yaml, READMEs, deployment
+
+**Decision:** the Render blueprint provisions NO database. `AGRO_DATABASE_URL`
+is a `sync: false` secret the user fills with a Neon connection string;
+`schema.sql`/`seed.sql` are applied once from the developer's machine
+(`psql -f`). The blueprint is a single web service (`runtime: docker`,
+`plan: free`, healthcheck `/healthz`).
+
+**Why:** Render allows only ONE active free-tier Postgres per account
+("cannot have more than one active free tier database"), which blocks the
+blueprint for users who already run any free Render Postgres — exactly the
+free-tier audience this demo targets. An external serverless Postgres (Neon:
+0.5 GB, `pgvector` native, no 30-day expiry like Render's free plan) keeps the
+whole stack at $0 and decouples the database from the hosting provider
+(portable: point `AGRO_DATABASE_URL` anywhere).
+
+**Trade-off:** one more moving part (external DB account); Neon free tier
+pauses after inactivity (seconds-scale cold start on the DB) and has
+compute-hour limits; the connection string crosses the Render prompt manually
+instead of being auto-wired via `fromDatabase`.
+
 ## Non-decisions (explicitly deferred)
 
 - **Conversation persistence** (messages table exists in schema but no chat

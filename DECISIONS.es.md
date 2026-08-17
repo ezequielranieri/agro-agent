@@ -327,6 +327,29 @@ de camino podría dar 400 porque Gemini exige `thought_signature` al reenviar un
 conversación completa queda en Groq; una key de entorno más por administrar
 (`GROQ_API_KEY`, opcional).
 
+## AD-017 · Postgres externo en Neon en vez de la base manejada por Render
+
+**Status:** accepted · **Scope:** render.yaml, READMEs, deploy
+
+**Decision:** el blueprint de Render NO provisiona base de datos.
+`AGRO_DATABASE_URL` es un secret `sync: false` que el usuario completa con una
+connection string de Neon; `schema.sql`/`seed.sql` se aplican una vez desde la
+máquina del desarrollador (`psql -f`). El blueprint es un único web service
+(`runtime: docker`, `plan: free`, healthcheck `/healthz`).
+
+**Por qué:** Render permite solo UNA base Postgres free activa por cuenta
+("cannot have more than one active free tier database"), lo que bloquea el
+blueprint para usuarios que ya corren cualquier Postgres free en Render —
+exactamente la audiencia free-tier que este demo apunta. Un Postgres
+serverless externo (Neon: 0.5 GB, `pgvector` nativo, sin expiración de 30 días
+como el plan free de Render) mantiene todo el stack en $0 y desacopla la base
+del proveedor de hosting (portable: apuntá `AGRO_DATABASE_URL` a donde sea).
+
+**Trade-off:** una pieza móvil más (cuenta externa de base); el free tier de
+Neon se pausa tras inactividad (cold start en la base, de segundos) y tiene
+límites de compute-hours; la connection string cruza el prompt de Render a mano
+en vez de auto-conectarse vía `fromDatabase`.
+
 ## No-decisiones (diferidas explícitamente)
 
 - **Persistencia de conversación** (la tabla messages existe en el schema pero

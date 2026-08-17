@@ -257,37 +257,38 @@ embeddings).
 ## Deployment
 
 Deploy to [Render](https://render.com) with the included
-[`render.yaml`](./render.yaml) blueprint:
+[`render.yaml`](./render.yaml) blueprint, and host the Postgres on
+[Neon](https://neon.tech) (free serverless Postgres, `pgvector` included):
 
 1. Push this repo to GitHub/GitLab, then create a **Blueprint Instance**
    (Dashboard → New → Blueprint Instance → connect the repo). Render
-   auto-detects `render.yaml`.
-2. Render provisions the **Postgres** service (`agro-db`) and builds the API
-   from [`./Dockerfile`](./Dockerfile) (multi-stage: static Go binary on
+   auto-detects `render.yaml` and builds the API from
+   [`./Dockerfile`](./Dockerfile) (multi-stage: static Go binary on
    `alpine:3.20`, non-root user, CA certs for the Gemini HTTPS calls).
-3. During Blueprint creation Render prompts once for the secrets:
-   - `GEMINI_API_KEY` — Gemini API key (chat + embeddings).
-   - `JWT_SECRET` — HS256 key shared with whoever mints the frontend tokens.
-   `AGRO_DATABASE_URL` is wired automatically from the Postgres service
-   (`fromDatabase → connectionString`).
+2. **Create the database on Neon** (free tier): New Project → copy the
+   connection string (`postgresql://...neon.tech/...`).
+3. During Blueprint creation Render prompts once for the secrets, including
+   `AGRO_DATABASE_URL` — paste the Neon DSN there. (`AGRO_DATABASE_URL` is
+   intentionally **not** `fromDatabase`: Render allows only one free-tier
+   Postgres per account, and an external DB keeps this deploy free and
+   provider-independent.)
 4. **Seed the database once.** Blueprint has no one-off job type and the web
-   container has no `psql`, so apply the schema+seed once against the
-   database's connection string (agro-db → Info page in the Dashboard), e.g.:
+   container has no `psql`, so apply the schema+seed once from your machine
+   against the Neon DSN:
 
    ```bash
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
    ```
 
-   `schema.sql` needs the `pgvector` extension, which Render managed Postgres
-   supports. `seed.sql` is **not idempotent** (fixed demo ids) — run it
-   exactly once.
+   `schema.sql` needs the `pgvector` extension, which Neon supports natively.
+   `seed.sql` is **not idempotent** (fixed demo ids) — run it exactly once.
 5. Health check: Render polls `GET /healthz` (public, no auth).
 
 Environment variables used by `cmd/api/main.go`:
 
 | Variable | Purpose |
 |---|---|
-| `AGRO_DATABASE_URL` | pgx DSN (auto-wired via `fromDatabase`) |
+| `AGRO_DATABASE_URL` | pgx DSN (from Neon; paste as secret) |
 | `GEMINI_API_KEY` | chat (primary) + embeddings; required unless `GROQ_API_KEY` is set |
 | `GROQ_API_KEY` | optional — enables automatic failover to Groq on Gemini `429`/`5xx` |
 | `GROQ_MODEL` | optional — Groq model (default `llama-3.3-70b-versatile`) |
@@ -304,8 +305,9 @@ Honest caveats:
   may call the LLM up to 5 times per request). Expect `429` /
   `RESOURCE_EXHAUSTED` and the built-in bounded retry. Setting `GROQ_API_KEY`
   turns that failure mode into an automatic fallback to Groq.
-- The free Postgres plan is single-node and meant for demos; pick a paid plan
-  for durability.
+- **Neon free tier** pauses after inactivity (cold start on the DB, seconds
+  not minutes) and has compute-hour limits; fine for demos, upgrade for
+  durability.
 
 ## Testing
 
