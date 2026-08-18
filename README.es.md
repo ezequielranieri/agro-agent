@@ -12,6 +12,8 @@ Go idiomático.
 
 > Documentación: [DECISIONS.es.md](./DECISIONS.es.md) — decisiones de arquitectura y constitución del proyecto
 
+> Frontend: [agro-web](https://github.com/ezequielranieri/agro-web) — UI de chat, lotes y aprobaciones HITL en Next.js (ver la [ingesta accept-both](#integración-con-agro-iam) para cómo este ecosistema reutiliza la identidad de agro-iam)
+
 ## Capturas
 
 <p align="center">

@@ -11,6 +11,8 @@ behavior in idiomatic Go.
 
 > Documentation: [DECISIONS.md](./DECISIONS.md) — architecture decisions & project constitution
 
+> Frontend: [agro-web](https://github.com/ezequielranieri/agro-web) — Next.js chat, lots, and HITL approvals UI (see the [accept-both intake](#integration-with-agro-iam) for how this ecosystem reuses agro-iam identity)
+
 ## Screenshots
 
 <p align="center">
